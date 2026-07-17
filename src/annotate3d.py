@@ -57,10 +57,7 @@ MODE_NORMAL = "normal"
 MODE_DRAW = "draw"
 
 
-def start_background_worker(max_ready: int = 5) -> subprocess.Popen | None:
-    pending = [z for z in sorted(RAW_DIR.glob("*.zip")) if not is_prepared(z)]
-    if not pending:
-        return None
+def start_background_worker(max_ready: int = 999) -> subprocess.Popen | None:
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     log = open(CACHE_ROOT / "worker.log", "a", encoding="utf-8")
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0

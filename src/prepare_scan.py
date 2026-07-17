@@ -91,15 +91,12 @@ def watch(
     poll_seconds: float = 5.0,
 ) -> None:
     """Keep at most `max_ready` prepared-but-unannotated scans ahead of the user.
-    As annotations are saved, more scans are prepared; exits when everything is prepared."""
+    Never exits: keeps polling so zips dropped into data/raw later are picked up too."""
     while True:
         zips = sorted(RAW_DIR.glob("*.zip"))
         unprepared = [z for z in zips if not is_prepared(z)]
-        if not unprepared:
-            print("[prepare] all scans prepared, worker exiting", flush=True)
-            return
         ready_unannotated = [z for z in zips if is_prepared(z) and not is_annotated(z)]
-        if len(ready_unannotated) >= max_ready:
+        if not unprepared or len(ready_unannotated) >= max_ready:
             time.sleep(poll_seconds)
             continue
         prepare(unprepared[0], weights=weights, conf=conf, min_views=min_views)

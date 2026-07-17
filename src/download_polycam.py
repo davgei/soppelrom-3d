@@ -51,6 +51,14 @@ def attach_download_capture(context: BrowserContext) -> None:
     context.on("page", on_page)
 
 
+def _wait_until_browser_closed(context: BrowserContext) -> None:
+    try:
+        while context.pages:
+            context.pages[0].wait_for_timeout(500)
+    except Exception:
+        pass
+
+
 def run_assist(context: BrowserContext, url: str) -> None:
     page = context.pages[0] if context.pages else context.new_page()
     page.goto(url)
@@ -61,10 +69,51 @@ def run_assist(context: BrowserContext, url: str) -> None:
         "  3. Alle nedlastinger lagres automatisk i data/raw med riktig navn\n"
         "  4. Lukk nettleseren når du er ferdig\n"
     )
-    try:
-        context.wait_for_event("close", timeout=0)
-    except Exception:
-        pass
+    _wait_until_browser_closed(context)
+
+
+def run_discover(context: BrowserContext, url: str) -> None:
+    trace_path = PROJECT_ROOT / "outputs" / "polycam_trace.log"
+    trace = open(trace_path, "w", encoding="utf-8")
+
+    def log_response(response) -> None:
+        try:
+            resource_type = response.request.resource_type
+            if resource_type not in ("xhr", "fetch", "document"):
+                return
+            content_type = response.headers.get("content-type", "")
+            trace.write(
+                f"{response.status} {response.request.method} {resource_type} "
+                f"{content_type} {response.url}\n"
+            )
+            interesting = any(
+                key in response.url.lower()
+                for key in ("capture", "library", "asset", "download", "export", "api", "raw")
+            )
+            if interesting and "json" in content_type:
+                try:
+                    body = response.text()
+                    trace.write("  BODY: " + body[:8000].replace("\n", " ") + "\n")
+                except Exception:
+                    pass
+            trace.flush()
+        except Exception:
+            pass
+
+    context.on("response", log_response)
+    page = context.pages[0] if context.pages else context.new_page()
+    page.goto(url)
+    print(
+        "\nDiscover-modus (kartlegger API-et for full automatisering):\n"
+        "  1. Logg inn og gå til biblioteket\n"
+        "  2. Scroll gjennom biblioteket (så liste-API-et vises)\n"
+        "  3. Last ned ETT skann manuelt (raw data / zip)\n"
+        "  4. Lukk nettleseren\n"
+        f"  -> all trafikk logges til {trace_path}\n"
+    )
+    _wait_until_browser_closed(context)
+    trace.close()
+    print(f"trace lagret: {trace_path}")
 
 
 def run_auto(context: BrowserContext, url: str, limit: int) -> None:
@@ -106,6 +155,8 @@ def run_auto(context: BrowserContext, url: str, limit: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Last ned Polycam-skann til data/raw.")
     parser.add_argument("--auto", action="store_true", help="prøv full automatisering (eksperimentell)")
+    parser.add_argument("--discover", action="store_true",
+                        help="kartlegg API-kallene (logg inn + last ned ETT skann manuelt)")
     parser.add_argument("--url", default=LIBRARY_URL, help="bibliotek-URL")
     parser.add_argument("--limit", type=int, default=10, help="maks captures i auto-modus")
     args = parser.parse_args()
@@ -122,7 +173,9 @@ def main() -> None:
         )
         attach_download_capture(context)
         try:
-            if args.auto:
+            if args.discover:
+                run_discover(context, args.url)
+            elif args.auto:
                 run_auto(context, args.url, args.limit)
             else:
                 run_assist(context, args.url)
