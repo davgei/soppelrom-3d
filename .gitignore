@@ -10,3 +10,6 @@ outputs/
 *.pt
 *.pth
 *.onnx
+
+# exception: the published fine-tuned weights are shared via the repo
+!models/bins_latest.pt

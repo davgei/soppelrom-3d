@@ -20,7 +20,8 @@ DEFAULT_PROMPTS = [
     "dumpster",
 ]
 
-LATEST_WEIGHTS = Path(__file__).resolve().parents[1] / "outputs" / "models" / "bins_latest.pt"
+# lives in the git-tracked models/ dir (gitignore exception) so weights can be shared via GitHub
+LATEST_WEIGHTS = Path(__file__).resolve().parents[1] / "models" / "bins_latest.pt"
 
 
 def default_weights() -> str:
