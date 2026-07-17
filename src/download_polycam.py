@@ -18,6 +18,9 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
+import time
+from pathlib import Path
 
 from playwright.sync_api import BrowserContext, Download, Page, TimeoutError, sync_playwright
 
@@ -25,6 +28,12 @@ from .prepare_scan import PROJECT_ROOT, RAW_DIR
 
 PROFILE_DIR = PROJECT_ROOT / "outputs" / "browser_profile"
 LIBRARY_URL = "https://poly.cam/library"
+CDP_PORT = 9222
+EDGE_PATHS = [
+    Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"),
+    Path("C:/Program Files/Microsoft/Edge/Application/msedge.exe"),
+]
+STEALTH_ARGS = ["--disable-blink-features=AutomationControlled", "--no-first-run"]
 
 DOWNLOAD_BUTTON_PATTERN = re.compile(r"download|last ned|export", re.IGNORECASE)
 RAW_OPTION_PATTERN = re.compile(r"raw|original|keyframe|source|data", re.IGNORECASE)
@@ -152,11 +161,41 @@ def run_auto(context: BrowserContext, url: str, limit: int) -> None:
             capture_page.close()
 
 
+def _find_edge() -> Path:
+    for path in EDGE_PATHS:
+        if path.exists():
+            return path
+    raise SystemExit("fant ikke msedge.exe — er Edge installert?")
+
+
+def _attach_plain_edge(playwright, url: str) -> BrowserContext:
+    """Launch a completely normal Edge (no automation flags at all, only a debug port)
+    and connect to it from the outside — indistinguishable from a hand-opened browser."""
+    profile = PROJECT_ROOT / "outputs" / "browser_profile_cdp"
+    profile.mkdir(parents=True, exist_ok=True)
+    subprocess.Popen([
+        str(_find_edge()),
+        f"--remote-debugging-port={CDP_PORT}",
+        f"--user-data-dir={profile}",
+        "--no-first-run",
+        url,
+    ])
+    for _ in range(30):
+        try:
+            browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{CDP_PORT}")
+            return browser.contexts[0]
+        except Exception:
+            time.sleep(1)
+    raise SystemExit(f"fikk ikke kontakt med Edge på port {CDP_PORT}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Last ned Polycam-skann til data/raw.")
     parser.add_argument("--auto", action="store_true", help="prøv full automatisering (eksperimentell)")
     parser.add_argument("--discover", action="store_true",
                         help="kartlegg API-kallene (logg inn + last ned ETT skann manuelt)")
+    parser.add_argument("--attach", action="store_true",
+                        help="bruk en helt vanlig Edge (omgår bot-deteksjon ved innlogging)")
     parser.add_argument("--url", default=LIBRARY_URL, help="bibliotek-URL")
     parser.add_argument("--limit", type=int, default=10, help="maks captures i auto-modus")
     args = parser.parse_args()
@@ -165,12 +204,17 @@ def main() -> None:
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as playwright:
-        context = playwright.chromium.launch_persistent_context(
-            str(PROFILE_DIR),
-            channel="msedge",
-            headless=False,
-            accept_downloads=True,
-        )
+        if args.attach:
+            context = _attach_plain_edge(playwright, args.url)
+        else:
+            context = playwright.chromium.launch_persistent_context(
+                str(PROFILE_DIR),
+                channel="msedge",
+                headless=False,
+                accept_downloads=True,
+                args=STEALTH_ARGS,
+                ignore_default_args=["--enable-automation"],
+            )
         attach_download_capture(context)
         try:
             if args.discover:
