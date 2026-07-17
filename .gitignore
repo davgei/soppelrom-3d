@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+
+# data and outputs stay out of git (large binaries)
+data/
+outputs/
+*.ply
+*.zip
+*.pt
+*.pth
+*.onnx
