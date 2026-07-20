@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import open3d as o3d
 
-from . import backproject, detection, render
+from . import backproject, binfit, detection, render
 from .loader import load_point_cloud
 from .reconstruct import ReconstructionConfig
 
@@ -54,29 +54,42 @@ def main() -> None:
     n_frames_hit = sum(1 for d in per_frame.values() if d)
     print(f"2D detections: {n_detections} across {n_frames_hit} frames")
 
-    instances = backproject.merge_detections(
+    raw_instances = backproject.merge_detections(
         archive, per_frame, floor_height=floor_height, eps=args.eps, min_views=args.min_views
     )
 
-    print(f"\n=== {len(instances)} bin instance(s) ===")
-    for index, inst in enumerate(instances):
+    scored = [(inst, binfit.score_candidate(inst.size, inst.mean_confidence, inst.n_views))
+              for inst in raw_instances]
+    kept = [(inst, v) for inst, v in scored if v.keep]
+    dropped = [(inst, v) for inst, v in scored if not v.keep]
+    instances = [inst for inst, _ in kept]
+
+    print(f"\n=== {len(kept)} bin(s) kept of {len(scored)} candidates (size+appearance fusion) ===")
+    for index, (inst, v) in enumerate(kept, start=1):
         length, height, width = inst.size
         print(
-            f"#{index + 1}: footprint {length:.2f} x {width:.2f} m, height {height:.2f} m, "
-            f"seen in {inst.n_views} frames, mean conf {inst.mean_confidence:.2f}, labels {inst.labels}"
+            f"#{index}: {v.bin_type}  score {v.score} "
+            f"(size {v.size_term}, conf {v.conf_term}, views {v.views_term})  "
+            f"{max(length, width):.2f} x {min(length, width):.2f} x {height:.2f} m, {inst.n_views} views"
         )
+    if dropped:
+        print(f"\ndropped {len(dropped)} candidate(s):")
+        for inst, v in dropped:
+            length, height, width = inst.size
+            print(f"  x  {max(length, width):.2f} x {min(length, width):.2f} x {height:.2f} m  - {v.reason}")
 
     if args.save_json:
         payload = [
             {
                 "center": inst.center.tolist(),
                 "size_lhw": inst.size.tolist(),
+                "bin_type": v.bin_type,
                 "yaw_deg": inst.yaw_deg,
                 "n_views": inst.n_views,
+                "score": v.score,
                 "mean_confidence": inst.mean_confidence,
-                "labels": inst.labels,
             }
-            for inst in instances
+            for inst, v in kept
         ]
         Path(args.save_json).parent.mkdir(parents=True, exist_ok=True)
         Path(args.save_json).write_text(json.dumps(payload, indent=2))

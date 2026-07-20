@@ -11,7 +11,7 @@ from pathlib import Path
 
 import open3d as o3d
 
-from . import annotations, backproject, detection
+from . import annotations, backproject, binfit, detection
 from .detect_bins3d import estimate_floor_height
 from .reconstruct import ReconstructionConfig, reconstruct
 from .reconstruct_mesh import MeshConfig, reconstruct_mesh_poisson
@@ -64,16 +64,16 @@ def prepare(
 
     boxes: list[annotations.BinBox] = []
     for inst in instances:
+        verdict = binfit.score_candidate(inst.size, inst.mean_confidence, inst.n_views)
+        if not verdict.keep:  # size+appearance fusion rejects noise (slivers, blobs, structure)
+            continue
         y_min = float(inst.center[1] - inst.size[1] / 2)
         y_max = float(inst.center[1] + inst.size[1] / 2)
         box = annotations.BinBox.from_min_area_rect(
-            inst.rect, y_min, y_max, n_views=inst.n_views, confidence=inst.mean_confidence
+            inst.rect, y_min, y_max, n_views=inst.n_views, confidence=verdict.score
         )
-        majority = max(inst.labels, key=inst.labels.get) if inst.labels else None
-        if majority in annotations.BIN_TYPES:  # fine-tuned model predicts our types directly
-            box.bin_type = majority
-        else:
-            box.bin_type = annotations.guess_bin_type(box.extent)
+        box.bin_type = verdict.bin_type
+        box.status = annotations.STATUS_APPROVED if verdict.auto_accept else annotations.STATUS_PROPOSED
         boxes.append(box)
 
     annotations.save_annotations(cache / "proposals.json", zip_path.name, floor_height, boxes)
