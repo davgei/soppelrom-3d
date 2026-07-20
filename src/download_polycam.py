@@ -331,15 +331,33 @@ def dump_controls(page: Page, note: str) -> list[str]:
     return unique
 
 
+def _open_capture(page: Page, url: str) -> bool:
+    """Navigate to a capture. Use domcontentloaded (the live 3D viewer never finishes 'load',
+    which caused ERR_ABORTED/timeouts), and retry once."""
+    for attempt in range(2):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            _settle(page)
+            return True
+        except Exception as error:
+            if attempt == 0:
+                page.wait_for_timeout(1500)
+                continue
+            print(f"  kunne ikke aapne siden: {str(error).splitlines()[0]}")
+    return False
+
+
 def export_capture(page: Page, context: BrowserContext, url: str, fmt: str) -> bool:
-    """Polycam Export dialog flow: click 'Download' (top bar) -> select the format tile
-    (e.g. 'Images', under the 'Other' column, below the fold) -> click the big 'Export' button.
-    The browser downloads the zip into data/raw (redirected via CDP); we watch for the file."""
-    page.goto(url)
-    _settle(page)
+    """Polycam Export dialog flow: click 'Download' -> select the format tile ('Images', under
+    'Other', below the fold) -> click 'Export'. The download is scoped to that click via
+    page.expect_download (no global state -> no cross-capture mix-ups), then fetched by its URL
+    (with save_as as a fallback)."""
+    if not _open_capture(page, url):
+        return False
 
     download_button = page.get_by_role("button", name="Download", exact=True)
     if not download_button.count():
+        print("  fant ikke Download-knappen")
         return False
     download_button.first.click()
     page.wait_for_timeout(2000)  # let the Export dialog open
@@ -359,38 +377,45 @@ def export_capture(page: Page, context: BrowserContext, url: str, fmt: str) -> b
     if not export_button.count():
         print("  fant ikke Export-knappen")
         return False
-    export_button.last.click()
 
-    capture_id = url.rstrip("/").split("/")[-1]
-    for i in range(120):
-        if _pending_download["url"]:
-            name = _pending_download["name"] or f"{capture_id}.zip"
-            if not name.lower().endswith(".zip"):
-                name = f"{name}.zip"
-            target = RAW_DIR / name
-            if target.exists():
-                print(f"  hopper over (finnes): {name}", flush=True)
-                return True
-            try:
-                response = context.request.get(_pending_download["url"], timeout=300000)
-                if not response.ok:
-                    print(f"  henting feilet: HTTP {response.status}", flush=True)
-                    return False
-                body = response.body()
-                if len(body) < 1_000_000:
-                    print(f"  for liten ({len(body)} bytes) — ikke keyframe-zip", flush=True)
-                    return False
+    try:
+        with page.expect_download(timeout=120000) as download_info:
+            export_button.last.click()
+        download = download_info.value
+    except Exception as error:
+        print(f"  ingen nedlasting startet: {str(error).splitlines()[0]}")
+        return False
+
+    name = download.suggested_filename or f"{url.rstrip('/').split('/')[-1]}.zip"
+    if not name.lower().endswith(".zip"):
+        name = f"{name}.zip"
+    target = RAW_DIR / name
+    if target.exists():
+        print(f"  hopper over (finnes): {name}", flush=True)
+        return True
+
+    # Preferred: fetch the signed URL directly. Fallback: Playwright's own save_as.
+    try:
+        response = context.request.get(download.url, timeout=300000)
+        if response.ok:
+            body = response.body()
+            if len(body) >= 1_000_000:
                 target.write_bytes(body)
                 print(f"  lagret: {name} ({len(body) / 1e6:.1f} MB) -> data/raw", flush=True)
                 return True
-            except Exception as error:
-                print(f"  henting feilet: {error}", flush=True)
-                return False
-        if i and i % 10 == 0:
-            print(f"    ... venter paa nedlastings-URL ({i}s)", flush=True)
-        _pump(context, 1000)
-    print("  ingen nedlasting startet innen 120 s")
-    return False
+            print(f"  URL ga for lite ({len(body)} bytes), proever save_as ...", flush=True)
+        else:
+            print(f"  URL ga HTTP {response.status}, proever save_as ...", flush=True)
+    except Exception as error:
+        print(f"  URL-henting feilet ({str(error).splitlines()[0]}), proever save_as ...", flush=True)
+
+    try:
+        download.save_as(str(target))
+        print(f"  lagret (save_as): {name} ({target.stat().st_size / 1e6:.1f} MB) -> data/raw", flush=True)
+        return True
+    except Exception as error:
+        print(f"  save_as feilet: {str(error).splitlines()[0]}")
+        return False
 
 
 def run_dump(context: BrowserContext, url: str) -> None:
