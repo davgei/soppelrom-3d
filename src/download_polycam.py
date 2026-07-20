@@ -42,23 +42,16 @@ RAW_OPTION_PATTERN = re.compile(r"raw|original|keyframe|source|data", re.IGNOREC
 LEDGER = PROJECT_ROOT / "outputs" / "downloaded_captures.txt"
 
 # Global download counter so a download is caught no matter which tab/popup it lands in.
-_downloads = {"count": 0}
+# The download event fires reliably (even in --attach/CDP) and exposes download.url — a
+# Cloudflare R2 signed URL. We capture it and fetch it directly with context.request, which is
+# far more robust than save_as (CDP quirks) or watching download folders.
+_pending_download = {"url": None, "name": None}
 
 
 def handle_download(download: Download) -> None:
-    _downloads["count"] += 1
-    try:
-        name = download.suggested_filename
-        print(f"  [nedlasting fanget] {name}  <- {download.url[:100]}", flush=True)
-        target = RAW_DIR / name
-        if target.exists():
-            print(f"  hopper over (finnes): {name}", flush=True)
-            return
-        download.save_as(target)
-        size_mb = target.stat().st_size / 1e6
-        print(f"  lagret: {name} ({size_mb:.1f} MB) -> data/raw", flush=True)
-    except Exception as error:
-        print(f"  (nedlasting kunne ikke lagres: {error})", flush=True)
+    _pending_download["url"] = download.url
+    _pending_download["name"] = download.suggested_filename
+    print(f"  [nedlasting fanget] {download.suggested_filename}", flush=True)
 
 
 def _load_ledger() -> set[str]:
@@ -273,12 +266,13 @@ def _wait_login(page: Page) -> None:
     print("  (fortsetter uansett)")
 
 
-def collect_capture_urls(page: Page) -> list[str]:
+def collect_capture_urls(page: Page, stop_after: int | None = None) -> list[str]:
     """Scroll the (virtualized) library to load every card, collecting as we go.
 
     The list unmounts cards that scroll out of view, so we scroll in SMALL overlapping steps
     (less than one viewport) and collect after every step — otherwise a whole screen of cards
-    can mount and unmount between two big scrolls and be missed."""
+    can mount and unmount between two big scrolls and be missed. `stop_after` stops early once
+    that many captures are found (fast for small test runs)."""
     print("  venter 10 s paa at biblioteket lastes inn ...", flush=True)
     page.wait_for_timeout(10000)
 
@@ -299,6 +293,8 @@ def collect_capture_urls(page: Page) -> list[str]:
     no_growth = 0
     for iteration in range(1000):
         collect()
+        if stop_after and len(seen) >= stop_after:
+            break
         before = len(seen)
         page.mouse.wheel(0, step)
         page.wait_for_timeout(600)
@@ -359,40 +355,41 @@ def export_capture(page: Page, context: BrowserContext, url: str, fmt: str) -> b
     tile.first.click()
     page.wait_for_timeout(600)
 
-    before = _snapshot_files(WATCH_DIRS)
     export_button = page.get_by_role("button", name="Export", exact=True)
     if not export_button.count():
         print("  fant ikke Export-knappen")
         return False
     export_button.last.click()
 
-    # The 'images' zip is large (tens–hundreds of MB) and Polycam generates it server-side first,
-    # so wait generously WHILE a download is in progress, but bail fast if none ever starts.
-    saw_progress = False
-    for i in range(900):
-        found = _new_finished_file(WATCH_DIRS, before)
-        if found:
-            destination = RAW_DIR / found.name
-            if not destination.name.lower().endswith(".zip"):
-                destination = destination.with_suffix(".zip")
-            if found.resolve() != destination.resolve():
-                if destination.exists():
-                    destination.unlink()
-                shutil.move(str(found), str(destination))
-            print(f"  lagret: {destination.name} ({destination.stat().st_size / 1e6:.1f} MB) -> data/raw", flush=True)
-            return True
-        partial = _partial_size(WATCH_DIRS)
-        saw_progress = saw_progress or partial > 0
-        if not saw_progress and i >= 40:
-            print("  ingen nedlasting startet innen 40 s")
-            return False
+    capture_id = url.rstrip("/").split("/")[-1]
+    for i in range(120):
+        if _pending_download["url"]:
+            name = _pending_download["name"] or f"{capture_id}.zip"
+            if not name.lower().endswith(".zip"):
+                name = f"{name}.zip"
+            target = RAW_DIR / name
+            if target.exists():
+                print(f"  hopper over (finnes): {name}", flush=True)
+                return True
+            try:
+                response = context.request.get(_pending_download["url"], timeout=300000)
+                if not response.ok:
+                    print(f"  henting feilet: HTTP {response.status}", flush=True)
+                    return False
+                body = response.body()
+                if len(body) < 1_000_000:
+                    print(f"  for liten ({len(body)} bytes) — ikke keyframe-zip", flush=True)
+                    return False
+                target.write_bytes(body)
+                print(f"  lagret: {name} ({len(body) / 1e6:.1f} MB) -> data/raw", flush=True)
+                return True
+            except Exception as error:
+                print(f"  henting feilet: {error}", flush=True)
+                return False
         if i and i % 10 == 0:
-            if partial:
-                print(f"    ... laster ned ({partial / 1e6:.0f} MB hittil) ({i}s)", flush=True)
-            else:
-                print(f"    ... venter paa at nedlastingen starter ({i}s)", flush=True)
+            print(f"    ... venter paa nedlastings-URL ({i}s)", flush=True)
         _pump(context, 1000)
-    print("  tidsavbrudd etter 900 s")
+    print("  ingen nedlasting startet innen 120 s")
     return False
 
 
@@ -434,13 +431,10 @@ def run_auto(context: BrowserContext, url: str, limit: int, fmt: str) -> None:
     page = context.pages[0] if context.pages else context.new_page()
     page.goto(url)
     _wait_login(page)
-    # NOTE: do NOT redirect downloads via CDP setDownloadBehavior — on this machine it created a
-    # broken GUID "download error" and made files unclickable. Let Edge download normally to its
-    # Downloads folder; we watch that folder and move the finished zip into data/raw.
-    print("  overvaaker nedlastingsmapper:")
-    for directory in WATCH_DIRS:
-        print(f"    - {directory}{'  (finnes)' if directory.exists() else '  (finnes ikke)'}")
-    urls = collect_capture_urls(page)
+    # For small test runs, stop scrolling as soon as we have enough captures (the full library
+    # scroll takes minutes); for the real bulk run (large --limit) scroll everything.
+    stop_after = (limit + 10) if limit <= 50 else None
+    urls = collect_capture_urls(page, stop_after=stop_after)
     ledger = _load_ledger()
     todo = [u for u in urls if u.rstrip("/").split("/")[-1] not in ledger]
     print(f"\nfant {len(urls)} captures, {len(urls) - len(todo)} allerede lastet ned "
