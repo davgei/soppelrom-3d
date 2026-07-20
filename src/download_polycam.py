@@ -376,6 +376,8 @@ def export_capture(page: Page, context: BrowserContext, url: str, fmt: str) -> b
             if not destination.name.lower().endswith(".zip"):
                 destination = destination.with_suffix(".zip")
             if found.resolve() != destination.resolve():
+                if destination.exists():
+                    destination.unlink()
                 shutil.move(str(found), str(destination))
             print(f"  lagret: {destination.name} ({destination.stat().st_size / 1e6:.1f} MB) -> data/raw", flush=True)
             return True
@@ -432,7 +434,9 @@ def run_auto(context: BrowserContext, url: str, limit: int, fmt: str) -> None:
     page = context.pages[0] if context.pages else context.new_page()
     page.goto(url)
     _wait_login(page)
-    _set_download_path(context, page, RAW_DIR)
+    # NOTE: do NOT redirect downloads via CDP setDownloadBehavior — on this machine it created a
+    # broken GUID "download error" and made files unclickable. Let Edge download normally to its
+    # Downloads folder; we watch that folder and move the finished zip into data/raw.
     print("  overvaaker nedlastingsmapper:")
     for directory in WATCH_DIRS:
         print(f"    - {directory}{'  (finnes)' if directory.exists() else '  (finnes ikke)'}")
