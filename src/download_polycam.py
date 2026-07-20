@@ -38,9 +38,14 @@ STEALTH_ARGS = ["--disable-blink-features=AutomationControlled", "--no-first-run
 
 DOWNLOAD_BUTTON_PATTERN = re.compile(r"download|last ned|export", re.IGNORECASE)
 RAW_OPTION_PATTERN = re.compile(r"raw|original|keyframe|source|data", re.IGNORECASE)
+LEDGER = PROJECT_ROOT / "outputs" / "downloaded_captures.txt"
+
+# Global download counter so a download is caught no matter which tab/popup it lands in.
+_downloads = {"count": 0}
 
 
 def handle_download(download: Download) -> None:
+    _downloads["count"] += 1
     try:
         name = download.suggested_filename
         print(f"  [nedlasting fanget] {name}  <- {download.url[:100]}", flush=True)
@@ -53,6 +58,18 @@ def handle_download(download: Download) -> None:
         print(f"  lagret: {name} ({size_mb:.1f} MB) -> data/raw", flush=True)
     except Exception as error:
         print(f"  (nedlasting kunne ikke lagres: {error})", flush=True)
+
+
+def _load_ledger() -> set[str]:
+    if LEDGER.exists():
+        return {line.strip() for line in LEDGER.read_text(encoding="utf-8").splitlines() if line.strip()}
+    return set()
+
+
+def _record_ledger(capture_id: str) -> None:
+    LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    with open(LEDGER, "a", encoding="utf-8") as handle:
+        handle.write(capture_id + "\n")
 
 
 def attach_download_capture(context: BrowserContext) -> None:
@@ -200,9 +217,27 @@ def dump_controls(page: Page, note: str) -> list[str]:
     return unique
 
 
-def export_capture(page: Page, url: str, fmt: str) -> bool:
-    """Real Polycam flow: click 'Download', click the chosen format, then (if the panel
-    requires it) 'Download now'. Returns True once a download has been captured."""
+def _wait_for_download(context: BrowserContext, before: int, timeout_s: int = 180) -> bool:
+    """Wait for the global download counter to rise — catches downloads on any tab/popup."""
+    for _ in range(timeout_s):
+        if _downloads["count"] > before:
+            return True
+        alive = [p for p in context.pages if not p.is_closed()]
+        if alive:
+            try:
+                alive[0].wait_for_timeout(1000)
+            except Exception:
+                time.sleep(1)
+        else:
+            time.sleep(1)
+    return False
+
+
+def export_capture(page: Page, context: BrowserContext, url: str, fmt: str) -> bool:
+    """Real Polycam flow: click 'Download', click the chosen option (e.g. 'images' = the raw
+    keyframe zip), then 'Download now' if the panel shows it. Popup-proof via the global
+    download counter, so it works no matter which tab/popup the download lands in."""
+    before = _downloads["count"]
     page.goto(url)
     _settle(page)
 
@@ -212,21 +247,20 @@ def export_capture(page: Page, url: str, fmt: str) -> bool:
     download_button.first.click()
     page.wait_for_timeout(1500)
 
-    option = page.get_by_role("button", name=fmt, exact=True)
+    option = page.get_by_role("button", name=fmt)  # case-insensitive substring match
     if not option.count():
-        print(f"  fant ikke format-knapp '{fmt}' i menyen")
+        print(f"  fant ikke '{fmt}' i nedlastingsmenyen")
         return False
+    option.first.click()
+    page.wait_for_timeout(1000)
 
-    try:
-        with page.expect_download(timeout=180000):
-            option.first.click()
-            page.wait_for_timeout(800)
-            confirm = page.get_by_role("button", name="Download now", exact=True)
-            if confirm.count() and confirm.first.is_visible():
-                confirm.first.click()
-        return True
-    except TimeoutError:
-        return False
+    confirm = page.get_by_role("button", name="Download now", exact=True)
+    if confirm.count() and confirm.first.is_visible():
+        confirm.first.click()
+
+    ok = _wait_for_download(context, before)
+    page.wait_for_timeout(500)  # let save_as finish before the next capture
+    return ok
 
 
 def run_dump(context: BrowserContext, url: str) -> None:
@@ -257,13 +291,18 @@ def run_auto(context: BrowserContext, url: str, limit: int, fmt: str) -> None:
     page.goto(url)
     _wait_login(page)
     urls = collect_capture_urls(page)
-    print(f"\nfant {len(urls)} captures, laster ned format '{fmt}'")
+    ledger = _load_ledger()
+    todo = [u for u in urls if u.rstrip("/").split("/")[-1] not in ledger]
+    print(f"\nfant {len(urls)} captures, {len(urls) - len(todo)} allerede lastet ned "
+          f"(hopper over), laster ned '{fmt}'")
 
     done, failed = 0, []
-    for index, capture_url in enumerate(urls[:limit], start=1):
-        print(f"\n[{index}/{min(len(urls), limit)}] {capture_url}", flush=True)
+    for index, capture_url in enumerate(todo[:limit], start=1):
+        capture_id = capture_url.rstrip("/").split("/")[-1]
+        print(f"\n[{index}/{min(len(todo), limit)}] {capture_url}", flush=True)
         try:
-            if export_capture(page, capture_url, fmt):
+            if export_capture(page, context, capture_url, fmt):
+                _record_ledger(capture_id)
                 done += 1
             else:
                 failed.append(capture_url)
@@ -315,8 +354,8 @@ def main() -> None:
                         help="bruk en helt vanlig Edge (omgår bot-deteksjon ved innlogging)")
     parser.add_argument("--url", default=LIBRARY_URL, help="bibliotek-URL")
     parser.add_argument("--limit", type=int, default=10, help="maks captures i auto-modus")
-    parser.add_argument("--format", default="Zip (all)",
-                        help="format-knappen som lastes ned i auto-modus (eksakt tekst)")
+    parser.add_argument("--format", default="images",
+                        help="knappen som lastes ned i auto-modus ('images' = raa keyframe-zip)")
     args = parser.parse_args()
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
