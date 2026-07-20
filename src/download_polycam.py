@@ -123,6 +123,20 @@ def _snapshot_files(dirs: list[Path]) -> set[str]:
     return found
 
 
+def _partial_size(dirs: list[Path]) -> int:
+    """Largest in-progress (.crdownload) download size across the watched folders, 0 if none."""
+    biggest = 0
+    for directory in dirs:
+        if not directory.exists():
+            continue
+        for path in directory.glob("*.crdownload"):
+            try:
+                biggest = max(biggest, path.stat().st_size)
+            except OSError:
+                continue
+    return biggest
+
+
 def _new_finished_file(dirs: list[Path], before: set[str], min_bytes: int = 1_000_000) -> Path | None:
     """Any new, finished (no partial suffix / .crdownload sibling), big-enough file — wherever
     the browser dropped it (Downloads, OneDrive-redirected Downloads, or data/raw)."""
@@ -352,7 +366,10 @@ def export_capture(page: Page, context: BrowserContext, url: str, fmt: str) -> b
         return False
     export_button.last.click()
 
-    for i in range(150):
+    # The 'images' zip is large (tens–hundreds of MB) and Polycam generates it server-side first,
+    # so wait generously WHILE a download is in progress, but bail fast if none ever starts.
+    saw_progress = False
+    for i in range(900):
         found = _new_finished_file(WATCH_DIRS, before)
         if found:
             destination = RAW_DIR / found.name
@@ -362,11 +379,18 @@ def export_capture(page: Page, context: BrowserContext, url: str, fmt: str) -> b
                 shutil.move(str(found), str(destination))
             print(f"  lagret: {destination.name} ({destination.stat().st_size / 1e6:.1f} MB) -> data/raw", flush=True)
             return True
-        if i and i % 15 == 0:
-            pending = any(d.exists() and list(d.glob("*.crdownload")) for d in WATCH_DIRS)
-            print(f"    ... venter paa nedlasting{' (paagaar)' if pending else ''} ({i}s)", flush=True)
+        partial = _partial_size(WATCH_DIRS)
+        saw_progress = saw_progress or partial > 0
+        if not saw_progress and i >= 40:
+            print("  ingen nedlasting startet innen 40 s")
+            return False
+        if i and i % 10 == 0:
+            if partial:
+                print(f"    ... laster ned ({partial / 1e6:.0f} MB hittil) ({i}s)", flush=True)
+            else:
+                print(f"    ... venter paa at nedlastingen starter ({i}s)", flush=True)
         _pump(context, 1000)
-    print("  ingen ny fil dukket opp i overvaakede mapper (tidsavbrudd)")
+    print("  tidsavbrudd etter 900 s")
     return False
 
 
