@@ -78,17 +78,13 @@ _captured = {"zip_url": None, "filename": None}
 
 
 def _looks_like_download(response) -> bool:
+    # Strict: only a real file attachment or a .zip URL. (octet-stream also matched Polycam's
+    # camera-transforms JSON, which the viewer loads on page open — that was the 90 KB garbage.)
     try:
         headers = response.headers
         disposition = headers.get("content-disposition", "").lower()
-        content_type = headers.get("content-type", "").lower()
         path = response.url.split("?")[0].lower()
-        return (
-            "attachment" in disposition
-            or path.endswith(".zip")
-            or "application/zip" in content_type
-            or "application/octet-stream" in content_type
-        )
+        return "attachment" in disposition or path.endswith(".zip")
     except Exception:
         return False
 
@@ -112,6 +108,9 @@ def _save_url(context: BrowserContext, url: str, filename: str) -> bool:
             print(f"  henting feilet: HTTP {response.status}", flush=True)
             return False
         body = response.body()
+        if len(body) < 1_000_000:  # real keyframe zips are tens of MB; smaller = wrong response
+            print(f"  ignorerer (for liten: {len(body)} bytes, ikke keyframe-zip)", flush=True)
+            return False
         target.write_bytes(body)
         print(f"  lagret: {filename} ({len(body) / 1e6:.1f} MB) -> data/raw", flush=True)
         return True
@@ -181,22 +180,19 @@ def run_discover(context: BrowserContext, url: str) -> None:
 
     def log_response(response) -> None:
         try:
-            resource_type = response.request.resource_type
-            if resource_type not in ("xhr", "fetch", "document"):
-                return
-            content_type = response.headers.get("content-type", "")
+            headers = response.headers
+            content_type = headers.get("content-type", "")
+            content_length = headers.get("content-length", "?")
+            disposition = headers.get("content-disposition", "")
             trace.write(
-                f"{response.status} {response.request.method} {resource_type} "
-                f"{content_type} {response.url}\n"
+                f"{response.status} {response.request.method} {response.request.resource_type} "
+                f"ct={content_type} len={content_length} cd={disposition} {response.url}\n"
             )
-            interesting = any(
-                key in response.url.lower()
-                for key in ("capture", "library", "asset", "download", "export", "api", "raw")
-            )
-            if interesting and "json" in content_type:
+            url_lower = response.url.lower()
+            keys = ("capture", "download", "export", "asset", "api", "archive", "zip", "raw", "job")
+            if "json" in content_type and any(key in url_lower for key in keys):
                 try:
-                    body = response.text()
-                    trace.write("  BODY: " + body[:8000].replace("\n", " ") + "\n")
+                    trace.write("  BODY: " + response.text()[:6000].replace("\n", " ") + "\n")
                 except Exception:
                     pass
             trace.flush()
@@ -296,9 +292,6 @@ def export_capture(page: Page, context: BrowserContext, url: str, fmt: str) -> b
     with context.request, which avoids the browser's download popup entirely. Falls back to a
     captured browser download if no URL is seen."""
     before_count = _downloads["count"]
-    _captured["zip_url"] = None
-    _captured["filename"] = None
-
     page.goto(url)
     _settle(page)
 
@@ -312,6 +305,11 @@ def export_capture(page: Page, context: BrowserContext, url: str, fmt: str) -> b
     if not option.count():
         print(f"  fant ikke '{fmt}' i nedlastingsmenyen")
         return False
+
+    # Reset here (after page load) so only traffic caused by the export click is captured,
+    # not the camera-transforms JSON the viewer loads when the page opens.
+    _captured["zip_url"] = None
+    _captured["filename"] = None
     option.first.click()
     page.wait_for_timeout(1000)
 
@@ -422,7 +420,7 @@ def main() -> None:
     parser.add_argument("--attach", action="store_true",
                         help="bruk en helt vanlig Edge (omgår bot-deteksjon ved innlogging)")
     parser.add_argument("--url", default=LIBRARY_URL, help="bibliotek-URL")
-    parser.add_argument("--limit", type=int, default=10, help="maks captures i auto-modus")
+    parser.add_argument("--limit", type=int, default=100000, help="maks antall skann (standard: alle)")
     parser.add_argument("--format", default="images",
                         help="knappen som lastes ned i auto-modus ('images' = raa keyframe-zip)")
     args = parser.parse_args()
