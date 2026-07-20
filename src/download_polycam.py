@@ -200,33 +200,33 @@ def dump_controls(page: Page, note: str) -> list[str]:
     return unique
 
 
-def export_capture(page: Page, url: str) -> bool:
-    """On a capture page: open export, choose raw data, trigger the download. Returns success."""
+def export_capture(page: Page, url: str, fmt: str) -> bool:
+    """Real Polycam flow: click 'Download', click the chosen format, then (if the panel
+    requires it) 'Download now'. Returns True once a download has been captured."""
     page.goto(url)
     _settle(page)
 
-    clicked = False
-    for pattern in (DOWNLOAD_BUTTON_PATTERN, re.compile(r"\.\.\.|more|meny", re.IGNORECASE)):
-        control = page.get_by_role("button", name=pattern)
-        if control.count():
-            control.first.click()
-            clicked = True
-            page.wait_for_timeout(1200)
-            break
-    if not clicked:
+    download_button = page.get_by_role("button", name="Download", exact=True)
+    if not download_button.count():
+        return False
+    download_button.first.click()
+    page.wait_for_timeout(1500)
+
+    option = page.get_by_role("button", name=fmt, exact=True)
+    if not option.count():
+        print(f"  fant ikke format-knapp '{fmt}' i menyen")
         return False
 
-    for pattern in (RAW_OPTION_PATTERN, DOWNLOAD_BUTTON_PATTERN):
-        option = page.get_by_text(pattern)
-        if option.count():
-            try:
-                with page.expect_download(timeout=90000):
-                    option.first.click()
-                page.wait_for_timeout(500)
-                return True
-            except TimeoutError:
-                continue
-    return False
+    try:
+        with page.expect_download(timeout=180000):
+            option.first.click()
+            page.wait_for_timeout(800)
+            confirm = page.get_by_role("button", name="Download now", exact=True)
+            if confirm.count() and confirm.first.is_visible():
+                confirm.first.click()
+        return True
+    except TimeoutError:
+        return False
 
 
 def run_dump(context: BrowserContext, url: str) -> None:
@@ -252,19 +252,18 @@ def run_dump(context: BrowserContext, url: str) -> None:
     input("Trykk Enter for aa lukke ... ")
 
 
-def run_auto(context: BrowserContext, url: str, limit: int) -> None:
+def run_auto(context: BrowserContext, url: str, limit: int, fmt: str) -> None:
     page = context.pages[0] if context.pages else context.new_page()
     page.goto(url)
     _wait_login(page)
     urls = collect_capture_urls(page)
-    existing = {p.stem for p in RAW_DIR.glob("*.zip")}
-    print(f"\nfant {len(urls)} captures, {len(existing)} allerede lastet ned")
+    print(f"\nfant {len(urls)} captures, laster ned format '{fmt}'")
 
     done, failed = 0, []
     for index, capture_url in enumerate(urls[:limit], start=1):
         print(f"\n[{index}/{min(len(urls), limit)}] {capture_url}", flush=True)
         try:
-            if export_capture(page, capture_url):
+            if export_capture(page, capture_url, fmt):
                 done += 1
             else:
                 failed.append(capture_url)
@@ -275,8 +274,6 @@ def run_auto(context: BrowserContext, url: str, limit: int) -> None:
             failed.append(capture_url)
 
     print(f"\nferdig: {done} lastet ned, {len(failed)} feilet")
-    if failed:
-        print("Hvis alt feilet: kjor --dump og lim inn menyvalgene, saa fikser jeg selektorene.")
 
 
 def _find_edge() -> Path:
@@ -318,6 +315,8 @@ def main() -> None:
                         help="bruk en helt vanlig Edge (omgår bot-deteksjon ved innlogging)")
     parser.add_argument("--url", default=LIBRARY_URL, help="bibliotek-URL")
     parser.add_argument("--limit", type=int, default=10, help="maks captures i auto-modus")
+    parser.add_argument("--format", default="Zip (all)",
+                        help="format-knappen som lastes ned i auto-modus (eksakt tekst)")
     args = parser.parse_args()
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
@@ -342,7 +341,7 @@ def main() -> None:
             elif args.discover:
                 run_discover(context, args.url)
             elif args.auto:
-                run_auto(context, args.url, args.limit)
+                run_auto(context, args.url, args.limit, args.format)
             else:
                 run_assist(context, args.url)
         finally:
