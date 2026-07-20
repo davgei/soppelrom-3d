@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from . import backbone, render
+from . import backbone, freespace, render
 from .loader import load_point_cloud
 from .reconstruct import ReconstructionConfig
 
@@ -41,10 +41,19 @@ def main() -> None:
     print(f"indoor/outdoor:             {'INDOOR' if geometry.is_indoor else 'OUTDOOR / open'}")
     print(f"reason:                     {geometry.reason}")
 
+    fs = freespace.compute_free_space(aligned, geometry.floor_height_m, footprint)
+    print("\n=== Free floor space ===")
+    print(f"observed flat floor:        {fs.observed_floor_area_m2:.1f} m^2")
+    print(f"occupied on floor:          {fs.occupied_on_floor_m2:.1f} m^2")
+    print(f"FREE floor area:            {fs.free_area_m2:.1f} m^2")
+
     if args.render_dir:
         out = Path(args.render_dir) / "room_topdown.png"
         render.annotated_topdown(aligned, footprint, out)
         print(f"\nannotated preview -> {out}")
+        fs_out = Path(args.render_dir) / "freespace_topdown.png"
+        render.freespace_topdown(fs, fs_out)
+        print(f"free-space preview -> {fs_out}")
 
     if args.view:
         from . import visualize

@@ -80,6 +80,24 @@ def annotated_topdown(
     cv2.imwrite(str(Path(out_path)), image)
 
 
+def freespace_topdown(result, out_path: str | Path, px_per_m: int = 100) -> None:
+    """Top-down free-space map: green = free floor, red = occupied, gray = other observed floor."""
+    rows, cols = result.free.shape
+    image = np.zeros((rows, cols, 3), np.uint8)
+    image[result.floor_observed] = (90, 90, 90)   # observed floor (gray, BGR)
+    image[result.occupied] = (40, 40, 200)        # occupied (red)
+    image[result.free] = (40, 180, 40)            # free (green)
+
+    scale = max(int(px_per_m * result.cell), 1)
+    image = cv2.resize(image, (cols * scale, rows * scale), interpolation=cv2.INTER_NEAREST)
+    image = np.ascontiguousarray(image[::-1])  # flip Z (up = +Z); contiguous so cv2 can draw on it
+    cv2.putText(
+        image, f"Ledig gulv: {result.free_area_m2:.1f} m2", (10, 30),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (40, 220, 40), 2,
+    )
+    cv2.imwrite(str(Path(out_path)), image)
+
+
 def detections_topdown(
     pcd: o3d.geometry.PointCloud,
     instances,
