@@ -332,16 +332,20 @@ def dump_controls(page: Page, note: str) -> list[str]:
 
 
 def _open_capture(page: Page, url: str) -> bool:
-    """Navigate to a capture. Use domcontentloaded (the live 3D viewer never finishes 'load',
-    which caused ERR_ABORTED/timeouts), and retry once."""
+    """Navigate to a capture. First blank the page to tear down the previous heavy 3D viewer
+    (keeps the machine from bogging down over many captures), then load with domcontentloaded
+    (the live viewer never reaches 'load', which caused ERR_ABORTED), retry once."""
     for attempt in range(2):
         try:
+            try:
+                page.goto("about:blank", timeout=10000)
+            except Exception:
+                pass
             page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            _settle(page)
             return True
         except Exception as error:
             if attempt == 0:
-                page.wait_for_timeout(1500)
+                page.wait_for_timeout(2000)
                 continue
             print(f"  kunne ikke aapne siden: {str(error).splitlines()[0]}")
     return False
@@ -355,12 +359,22 @@ def export_capture(page: Page, context: BrowserContext, url: str, fmt: str) -> b
     if not _open_capture(page, url):
         return False
 
+    # WAIT for the UI to render — on a slow PC the page hadn't painted the Download button yet
+    # when we looked, which is why it was "missing". Poll until it's actually visible.
     download_button = page.get_by_role("button", name="Download", exact=True)
-    if not download_button.count():
-        print("  fant ikke Download-knappen")
+    try:
+        download_button.first.wait_for(state="visible", timeout=40000)
+    except Exception:
+        print("  Download-knappen kom ikke fram (siden lastet ikke ferdig)")
         return False
     download_button.first.click()
-    page.wait_for_timeout(2000)  # let the Export dialog open
+
+    export_button = page.get_by_role("button", name="Export", exact=True)
+    try:
+        export_button.last.wait_for(state="visible", timeout=20000)
+    except Exception:
+        print("  eksportdialogen kom ikke fram")
+        return False
 
     tile = page.get_by_text(fmt, exact=True)
     if not tile.count():
@@ -371,12 +385,7 @@ def export_capture(page: Page, context: BrowserContext, url: str, fmt: str) -> b
     except Exception:
         pass
     tile.first.click()
-    page.wait_for_timeout(600)
-
-    export_button = page.get_by_role("button", name="Export", exact=True)
-    if not export_button.count():
-        print("  fant ikke Export-knappen")
-        return False
+    page.wait_for_timeout(500)
 
     try:
         with page.expect_download(timeout=120000) as download_info:
