@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -72,55 +73,48 @@ def _record_ledger(capture_id: str) -> None:
         handle.write(capture_id + "\n")
 
 
-# Grab the real download URL from network traffic and fetch it directly — this sidesteps the
-# browser's own download window (the popup that was blocking auto-download in --attach mode).
-_captured = {"zip_url": None, "filename": None}
+# The real 'images' export is a normal browser download (opens a popup). We don't try to catch
+# it as a network response; we redirect downloads to data/raw and watch for the finished file.
+WATCH_DIRS = [RAW_DIR, Path.home() / "Downloads"]
 
 
-def _looks_like_download(response) -> bool:
-    # Strict: only a real file attachment or a .zip URL. (octet-stream also matched Polycam's
-    # camera-transforms JSON, which the viewer loads on page open — that was the 90 KB garbage.)
+def _snapshot_zips(dirs: list[Path]) -> set[str]:
+    found: set[str] = set()
+    for directory in dirs:
+        if directory.exists():
+            for path in directory.glob("*.zip"):
+                found.add(str(path))
+    return found
+
+
+def _new_finished_zip(dirs: list[Path], before: set[str], min_bytes: int = 1_000_000) -> Path | None:
+    """A .zip that is new, no longer downloading (.crdownload gone), and big enough to be real."""
+    for directory in dirs:
+        if not directory.exists():
+            continue
+        for path in directory.glob("*.zip"):
+            if str(path) in before or Path(str(path) + ".crdownload").exists():
+                continue
+            try:
+                if path.stat().st_size >= min_bytes:
+                    return path
+            except OSError:
+                continue
+    return None
+
+
+def _set_download_path(context: BrowserContext, page: Page, folder: Path) -> None:
+    """Point the browser's downloads at `folder` via CDP so the popup download lands there."""
     try:
-        headers = response.headers
-        disposition = headers.get("content-disposition", "").lower()
-        path = response.url.split("?")[0].lower()
-        return "attachment" in disposition or path.endswith(".zip")
-    except Exception:
-        return False
-
-
-def _on_response(response) -> None:
-    if _looks_like_download(response):
-        _captured["zip_url"] = response.url
-        disposition = response.headers.get("content-disposition", "")
-        match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', disposition)
-        _captured["filename"] = match.group(1) if match else None
-
-
-def _save_url(context: BrowserContext, url: str, filename: str) -> bool:
-    target = RAW_DIR / filename
-    if target.exists():
-        print(f"  hopper over (finnes): {filename}", flush=True)
-        return True
-    try:
-        response = context.request.get(url, timeout=180000)
-        if not response.ok:
-            print(f"  henting feilet: HTTP {response.status}", flush=True)
-            return False
-        body = response.body()
-        if len(body) < 1_000_000:  # real keyframe zips are tens of MB; smaller = wrong response
-            print(f"  ignorerer (for liten: {len(body)} bytes, ikke keyframe-zip)", flush=True)
-            return False
-        target.write_bytes(body)
-        print(f"  lagret: {filename} ({len(body) / 1e6:.1f} MB) -> data/raw", flush=True)
-        return True
+        session = context.new_cdp_session(page)
+        session.send("Browser.setDownloadBehavior", {"behavior": "allow", "downloadPath": str(folder)})
+        print(f"  nedlastinger settes til {folder}", flush=True)
     except Exception as error:
-        print(f"  henting feilet: {error}", flush=True)
-        return False
+        print(f"  (kunne ikke omdirigere nedlastinger: {error}; overvaaker data/raw + Downloads)", flush=True)
 
 
 def _pump(context: BrowserContext, ms: int) -> None:
-    """Let Playwright process events (download/response) for ~ms milliseconds."""
+    """Let Playwright process events for ~ms milliseconds without blocking the download."""
     alive = [p for p in context.pages if not p.is_closed()]
     if alive:
         try:
@@ -288,10 +282,8 @@ def dump_controls(page: Page, note: str) -> list[str]:
 
 def export_capture(page: Page, context: BrowserContext, url: str, fmt: str) -> bool:
     """Real Polycam flow: click 'Download' -> the 'images' option (raw keyframe zip) ->
-    'Download now' if shown. We grab the zip URL straight from network traffic and fetch it
-    with context.request, which avoids the browser's download popup entirely. Falls back to a
-    captured browser download if no URL is seen."""
-    before_count = _downloads["count"]
+    'Download now' if shown. The browser performs the actual download (its popup works); we've
+    redirected downloads to data/raw and just watch for the finished zip to appear."""
     page.goto(url)
     _settle(page)
 
@@ -306,27 +298,27 @@ def export_capture(page: Page, context: BrowserContext, url: str, fmt: str) -> b
         print(f"  fant ikke '{fmt}' i nedlastingsmenyen")
         return False
 
-    # Reset here (after page load) so only traffic caused by the export click is captured,
-    # not the camera-transforms JSON the viewer loads when the page opens.
-    _captured["zip_url"] = None
-    _captured["filename"] = None
+    before = _snapshot_zips(WATCH_DIRS)
     option.first.click()
     page.wait_for_timeout(1000)
-
     confirm = page.get_by_role("button", name="Download now", exact=True)
     if confirm.count() and confirm.first.is_visible():
         confirm.first.click()
 
-    capture_id = url.rstrip("/").split("/")[-1]
-    for _ in range(180):
-        if _captured["zip_url"]:
-            filename = _captured["filename"] or f"{capture_id}.zip"
-            return _save_url(context, _captured["zip_url"], filename)
-        if _downloads["count"] > before_count:  # fallback: browser did capture a download
-            _pump(context, 800)
+    for i in range(150):
+        found = _new_finished_zip(WATCH_DIRS, before)
+        if found:
+            if found.parent != RAW_DIR:
+                destination = RAW_DIR / found.name
+                shutil.move(str(found), str(destination))
+                found = destination
+            print(f"  lagret: {found.name} ({found.stat().st_size / 1e6:.1f} MB) -> data/raw", flush=True)
             return True
+        if i and i % 15 == 0:
+            pending = any(d.exists() and list(d.glob("*.crdownload")) for d in WATCH_DIRS)
+            print(f"    ... venter paa nedlasting{' (paagaar)' if pending else ''} ({i}s)", flush=True)
         _pump(context, 1000)
-    print("  ingen nedlasting fanget (tidsavbrudd)")
+    print("  ingen ny zip dukket opp (tidsavbrudd)")
     return False
 
 
@@ -357,6 +349,7 @@ def run_auto(context: BrowserContext, url: str, limit: int, fmt: str) -> None:
     page = context.pages[0] if context.pages else context.new_page()
     page.goto(url)
     _wait_login(page)
+    _set_download_path(context, page, RAW_DIR)
     urls = collect_capture_urls(page)
     ledger = _load_ledger()
     todo = [u for u in urls if u.rstrip("/").split("/")[-1] not in ledger]
@@ -441,7 +434,6 @@ def main() -> None:
                 ignore_default_args=["--enable-automation"],
             )
         attach_download_capture(context)
-        context.on("response", _on_response)
         try:
             if args.dump:
                 run_dump(context, args.url)
