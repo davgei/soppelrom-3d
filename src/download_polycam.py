@@ -229,30 +229,41 @@ def _wait_login(page: Page) -> None:
 
 
 def collect_capture_urls(page: Page) -> list[str]:
-    """Scroll the library to load every card, then collect all capture URLs."""
+    """Scroll the (virtualized) library to load every card, collecting as we go.
+
+    The list unmounts cards that scroll out of view, so we scroll in SMALL overlapping steps
+    (less than one viewport) and collect after every step — otherwise a whole screen of cards
+    can mount and unmount between two big scrolls and be missed."""
     print("  venter 10 s paa at biblioteket lastes inn ...", flush=True)
     page.wait_for_timeout(10000)
+
+    viewport = page.viewport_size or {"width": 1280, "height": 800}
+    page.mouse.move(viewport["width"] / 2, viewport["height"] / 2)  # so the wheel scrolls the list
+    step = int(viewport["height"] * 0.6)  # overlap ~40% between windows
+
     seen: dict[str, None] = {}
+
+    def collect() -> None:
+        anchors = page.locator("a[href*='/capture/']")
+        for i in range(anchors.count()):
+            href = anchors.nth(i).get_attribute("href")
+            if href:
+                url = href if href.startswith("http") else f"https://poly.cam{href}"
+                seen.setdefault(url.split("?")[0], None)
+
     no_growth = 0
-    for _ in range(300):
-        anchors = page.locator("a[href*='/capture/']")
-        for i in range(anchors.count()):
-            href = anchors.nth(i).get_attribute("href")
-            if href:
-                url = href if href.startswith("http") else f"https://poly.cam{href}"
-                seen.setdefault(url.split("?")[0], None)
+    for iteration in range(1000):
+        collect()
         before = len(seen)
-        page.mouse.wheel(0, 5000)
-        page.wait_for_timeout(1200)
-        anchors = page.locator("a[href*='/capture/']")
-        for i in range(anchors.count()):
-            href = anchors.nth(i).get_attribute("href")
-            if href:
-                url = href if href.startswith("http") else f"https://poly.cam{href}"
-                seen.setdefault(url.split("?")[0], None)
+        page.mouse.wheel(0, step)
+        page.wait_for_timeout(600)
+        collect()
         no_growth = no_growth + 1 if len(seen) == before else 0
-        if no_growth >= 6:
+        if no_growth >= 12:  # ~7 s of no new cards => reached the bottom
             break
+        if iteration % 15 == 0 and iteration:
+            print(f"    ... {len(seen)} captures funnet saa langt", flush=True)
+    print(f"  ferdig: {len(seen)} captures", flush=True)
     return list(seen)
 
 
