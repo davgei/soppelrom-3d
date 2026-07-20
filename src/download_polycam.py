@@ -73,27 +73,68 @@ def _record_ledger(capture_id: str) -> None:
         handle.write(capture_id + "\n")
 
 
-# The real 'images' export is a normal browser download (opens a popup). We don't try to catch
-# it as a network response; we redirect downloads to data/raw and watch for the finished file.
-WATCH_DIRS = [RAW_DIR, Path.home() / "Downloads"]
+# The real 'images' export is a normal browser download (opens a popup). We don't catch it as a
+# network response; we watch the actual download folders for the finished file and move it in.
+_PARTIAL_SUFFIXES = (".crdownload", ".tmp", ".partial", ".part", ".download")
 
 
-def _snapshot_zips(dirs: list[Path]) -> set[str]:
+def _downloads_dir() -> Path:
+    """The user's real Downloads folder from the Windows registry (handles OneDrive redirection)."""
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders",
+        )
+        value, _ = winreg.QueryValueEx(key, "{374DE290-123F-4565-9164-39C4925E467B}")
+        return Path(value)
+    except Exception:
+        return Path.home() / "Downloads"
+
+
+def _watch_dirs() -> list[Path]:
+    candidates = [
+        RAW_DIR,
+        _downloads_dir(),
+        Path.home() / "Downloads",
+        Path.home() / "OneDrive" / "Downloads",
+        Path.home() / "OneDrive - Oslo kommune" / "Downloads",
+    ]
+    seen: set[str] = set()
+    result: list[Path] = []
+    for directory in candidates:
+        key = str(directory).lower()
+        if key not in seen:
+            seen.add(key)
+            result.append(directory)
+    return result
+
+
+WATCH_DIRS = _watch_dirs()
+
+
+def _snapshot_files(dirs: list[Path]) -> set[str]:
     found: set[str] = set()
     for directory in dirs:
         if directory.exists():
-            for path in directory.glob("*.zip"):
-                found.add(str(path))
+            for path in directory.iterdir():
+                if path.is_file():
+                    found.add(str(path))
     return found
 
 
-def _new_finished_zip(dirs: list[Path], before: set[str], min_bytes: int = 1_000_000) -> Path | None:
-    """A .zip that is new, no longer downloading (.crdownload gone), and big enough to be real."""
+def _new_finished_file(dirs: list[Path], before: set[str], min_bytes: int = 1_000_000) -> Path | None:
+    """Any new, finished (no partial suffix / .crdownload sibling), big-enough file — wherever
+    the browser dropped it (Downloads, OneDrive-redirected Downloads, or data/raw)."""
     for directory in dirs:
         if not directory.exists():
             continue
-        for path in directory.glob("*.zip"):
-            if str(path) in before or Path(str(path) + ".crdownload").exists():
+        for path in directory.iterdir():
+            if not path.is_file() or str(path) in before:
+                continue
+            if path.suffix.lower() in _PARTIAL_SUFFIXES:
+                continue
+            if Path(str(path) + ".crdownload").exists():
                 continue
             try:
                 if path.stat().st_size >= min_bytes:
@@ -304,7 +345,7 @@ def export_capture(page: Page, context: BrowserContext, url: str, fmt: str) -> b
     tile.first.click()
     page.wait_for_timeout(600)
 
-    before = _snapshot_zips(WATCH_DIRS)
+    before = _snapshot_files(WATCH_DIRS)
     export_button = page.get_by_role("button", name="Export", exact=True)
     if not export_button.count():
         print("  fant ikke Export-knappen")
@@ -312,19 +353,20 @@ def export_capture(page: Page, context: BrowserContext, url: str, fmt: str) -> b
     export_button.last.click()
 
     for i in range(150):
-        found = _new_finished_zip(WATCH_DIRS, before)
+        found = _new_finished_file(WATCH_DIRS, before)
         if found:
-            if found.parent != RAW_DIR:
-                destination = RAW_DIR / found.name
+            destination = RAW_DIR / found.name
+            if not destination.name.lower().endswith(".zip"):
+                destination = destination.with_suffix(".zip")
+            if found.resolve() != destination.resolve():
                 shutil.move(str(found), str(destination))
-                found = destination
-            print(f"  lagret: {found.name} ({found.stat().st_size / 1e6:.1f} MB) -> data/raw", flush=True)
+            print(f"  lagret: {destination.name} ({destination.stat().st_size / 1e6:.1f} MB) -> data/raw", flush=True)
             return True
         if i and i % 15 == 0:
             pending = any(d.exists() and list(d.glob("*.crdownload")) for d in WATCH_DIRS)
             print(f"    ... venter paa nedlasting{' (paagaar)' if pending else ''} ({i}s)", flush=True)
         _pump(context, 1000)
-    print("  ingen ny zip dukket opp (tidsavbrudd)")
+    print("  ingen ny fil dukket opp i overvaakede mapper (tidsavbrudd)")
     return False
 
 
@@ -367,6 +409,9 @@ def run_auto(context: BrowserContext, url: str, limit: int, fmt: str) -> None:
     page.goto(url)
     _wait_login(page)
     _set_download_path(context, page, RAW_DIR)
+    print("  overvaaker nedlastingsmapper:")
+    for directory in WATCH_DIRS:
+        print(f"    - {directory}{'  (finnes)' if directory.exists() else '  (finnes ikke)'}")
     urls = collect_capture_urls(page)
     ledger = _load_ledger()
     todo = [u for u in urls if u.rstrip("/").split("/")[-1] not in ledger]
