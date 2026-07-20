@@ -72,6 +72,66 @@ def _record_ledger(capture_id: str) -> None:
         handle.write(capture_id + "\n")
 
 
+# Grab the real download URL from network traffic and fetch it directly — this sidesteps the
+# browser's own download window (the popup that was blocking auto-download in --attach mode).
+_captured = {"zip_url": None, "filename": None}
+
+
+def _looks_like_download(response) -> bool:
+    try:
+        headers = response.headers
+        disposition = headers.get("content-disposition", "").lower()
+        content_type = headers.get("content-type", "").lower()
+        path = response.url.split("?")[0].lower()
+        return (
+            "attachment" in disposition
+            or path.endswith(".zip")
+            or "application/zip" in content_type
+            or "application/octet-stream" in content_type
+        )
+    except Exception:
+        return False
+
+
+def _on_response(response) -> None:
+    if _looks_like_download(response):
+        _captured["zip_url"] = response.url
+        disposition = response.headers.get("content-disposition", "")
+        match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', disposition)
+        _captured["filename"] = match.group(1) if match else None
+
+
+def _save_url(context: BrowserContext, url: str, filename: str) -> bool:
+    target = RAW_DIR / filename
+    if target.exists():
+        print(f"  hopper over (finnes): {filename}", flush=True)
+        return True
+    try:
+        response = context.request.get(url, timeout=180000)
+        if not response.ok:
+            print(f"  henting feilet: HTTP {response.status}", flush=True)
+            return False
+        body = response.body()
+        target.write_bytes(body)
+        print(f"  lagret: {filename} ({len(body) / 1e6:.1f} MB) -> data/raw", flush=True)
+        return True
+    except Exception as error:
+        print(f"  henting feilet: {error}", flush=True)
+        return False
+
+
+def _pump(context: BrowserContext, ms: int) -> None:
+    """Let Playwright process events (download/response) for ~ms milliseconds."""
+    alive = [p for p in context.pages if not p.is_closed()]
+    if alive:
+        try:
+            alive[0].wait_for_timeout(ms)
+            return
+        except Exception:
+            pass
+    time.sleep(ms / 1000)
+
+
 def attach_download_capture(context: BrowserContext) -> None:
     def on_page(page: Page) -> None:
         page.on("download", handle_download)
@@ -170,6 +230,8 @@ def _wait_login(page: Page) -> None:
 
 def collect_capture_urls(page: Page) -> list[str]:
     """Scroll the library to load every card, then collect all capture URLs."""
+    print("  venter 10 s paa at biblioteket lastes inn ...", flush=True)
+    page.wait_for_timeout(10000)
     seen: dict[str, None] = {}
     no_growth = 0
     for _ in range(300):
@@ -181,7 +243,7 @@ def collect_capture_urls(page: Page) -> list[str]:
                 seen.setdefault(url.split("?")[0], None)
         before = len(seen)
         page.mouse.wheel(0, 5000)
-        page.wait_for_timeout(700)
+        page.wait_for_timeout(1200)
         anchors = page.locator("a[href*='/capture/']")
         for i in range(anchors.count()):
             href = anchors.nth(i).get_attribute("href")
@@ -189,7 +251,7 @@ def collect_capture_urls(page: Page) -> list[str]:
                 url = href if href.startswith("http") else f"https://poly.cam{href}"
                 seen.setdefault(url.split("?")[0], None)
         no_growth = no_growth + 1 if len(seen) == before else 0
-        if no_growth >= 4:
+        if no_growth >= 6:
             break
     return list(seen)
 
@@ -217,27 +279,15 @@ def dump_controls(page: Page, note: str) -> list[str]:
     return unique
 
 
-def _wait_for_download(context: BrowserContext, before: int, timeout_s: int = 180) -> bool:
-    """Wait for the global download counter to rise — catches downloads on any tab/popup."""
-    for _ in range(timeout_s):
-        if _downloads["count"] > before:
-            return True
-        alive = [p for p in context.pages if not p.is_closed()]
-        if alive:
-            try:
-                alive[0].wait_for_timeout(1000)
-            except Exception:
-                time.sleep(1)
-        else:
-            time.sleep(1)
-    return False
-
-
 def export_capture(page: Page, context: BrowserContext, url: str, fmt: str) -> bool:
-    """Real Polycam flow: click 'Download', click the chosen option (e.g. 'images' = the raw
-    keyframe zip), then 'Download now' if the panel shows it. Popup-proof via the global
-    download counter, so it works no matter which tab/popup the download lands in."""
-    before = _downloads["count"]
+    """Real Polycam flow: click 'Download' -> the 'images' option (raw keyframe zip) ->
+    'Download now' if shown. We grab the zip URL straight from network traffic and fetch it
+    with context.request, which avoids the browser's download popup entirely. Falls back to a
+    captured browser download if no URL is seen."""
+    before_count = _downloads["count"]
+    _captured["zip_url"] = None
+    _captured["filename"] = None
+
     page.goto(url)
     _settle(page)
 
@@ -258,9 +308,17 @@ def export_capture(page: Page, context: BrowserContext, url: str, fmt: str) -> b
     if confirm.count() and confirm.first.is_visible():
         confirm.first.click()
 
-    ok = _wait_for_download(context, before)
-    page.wait_for_timeout(500)  # let save_as finish before the next capture
-    return ok
+    capture_id = url.rstrip("/").split("/")[-1]
+    for _ in range(180):
+        if _captured["zip_url"]:
+            filename = _captured["filename"] or f"{capture_id}.zip"
+            return _save_url(context, _captured["zip_url"], filename)
+        if _downloads["count"] > before_count:  # fallback: browser did capture a download
+            _pump(context, 800)
+            return True
+        _pump(context, 1000)
+    print("  ingen nedlasting fanget (tidsavbrudd)")
+    return False
 
 
 def run_dump(context: BrowserContext, url: str) -> None:
@@ -374,6 +432,7 @@ def main() -> None:
                 ignore_default_args=["--enable-automation"],
             )
         attach_download_capture(context)
+        context.on("response", _on_response)
         try:
             if args.dump:
                 run_dump(context, args.url)
