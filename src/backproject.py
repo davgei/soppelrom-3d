@@ -11,9 +11,14 @@ from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
+from scipy.signal import find_peaks
 
 from .detection import Detection2D
 from .scan_io import Keyframe, ScanArchive
+
+SPLIT_MAX_SINGLE = 1.6      # a cluster longer than this may be several bins in a row
+SPLIT_MIN_SEPARATION = 0.5  # density peaks (bins) must be at least this far apart (m)
+MIN_SEGMENT_POINTS = 30
 
 _ARKIT_FLIP = np.diag([1.0, -1.0, -1.0])
 
@@ -115,6 +120,60 @@ def _cluster_centroids(centroids: np.ndarray, eps: float, min_samples: int) -> n
     return labels
 
 
+def _split_masks(points_xz: np.ndarray, bin_width: float = 0.05) -> list[np.ndarray] | None:
+    """Split a merged cluster of adjacent bins by finding density valleys (the gaps between
+    bins) along the cluster's long axis. Returns per-segment boolean masks, or None if the
+    cluster is single-bin sized or shows no clear multi-bin structure."""
+    rect = cv2.minAreaRect(points_xz.astype(np.float32))
+    box = cv2.boxPoints(rect)
+    edge_a, edge_b = box[1] - box[0], box[2] - box[1]
+    axis = edge_a if np.linalg.norm(edge_a) >= np.linalg.norm(edge_b) else edge_b
+    norm = np.linalg.norm(axis)
+    if norm < 1e-6:
+        return None
+    projection = points_xz @ (axis / norm)
+
+    low, high = float(projection.min()), float(projection.max())
+    if high - low <= SPLIT_MAX_SINGLE:
+        return None
+
+    n_bins = max(4, int((high - low) / bin_width))
+    hist, edges = np.histogram(projection, bins=n_bins, range=(low, high))
+    smooth = np.convolve(hist, np.ones(3) / 3, mode="same")
+    distance = max(1, int(SPLIT_MIN_SEPARATION / ((high - low) / n_bins)))
+    peaks, _ = find_peaks(smooth, distance=distance, prominence=max(smooth.max() * 0.25, 1.0))
+    if len(peaks) <= 1:
+        return None
+
+    cuts = [float(edges[p1 + int(np.argmin(smooth[p1:p2 + 1]))]) for p1, p2 in zip(peaks[:-1], peaks[1:])]
+    bounds = [-np.inf, *cuts, np.inf]
+    return [(projection >= a) & (projection < b) for a, b in zip(bounds[:-1], bounds[1:])]
+
+
+def _instance_from_points(
+    points: np.ndarray,
+    floor_height: float | None,
+    n_views: int,
+    mean_confidence: float,
+    label_counts: dict[str, int],
+) -> BinInstance:
+    rect = cv2.minAreaRect(points[:, [0, 2]].astype(np.float32))
+    (cx, cz), (side_a, side_b), angle = rect
+    length, width = (side_a, side_b) if side_a >= side_b else (side_b, side_a)
+    y_min = floor_height if floor_height is not None else float(points[:, 1].min())
+    y_max = float(np.percentile(points[:, 1], 98))
+    return BinInstance(
+        center=np.array([cx, (y_min + y_max) / 2, cz]),
+        size=np.array([length, y_max - y_min, width]),
+        yaw_deg=float(angle),
+        rect=rect,
+        n_views=n_views,
+        mean_confidence=mean_confidence,
+        labels=label_counts,
+        points=points,
+    )
+
+
 def merge_detections(
     archive: ScanArchive,
     per_frame: dict[int, list[Detection2D]],
@@ -163,30 +222,22 @@ def merge_detections(
         if len(trimmed) < 30:
             trimmed = points
 
-        rect = cv2.minAreaRect(trimmed[:, [0, 2]].astype(np.float32))
-        (cx, cz), (side_a, side_b), angle = rect
-        length, width = (side_a, side_b) if side_a >= side_b else (side_b, side_a)
-
-        y_min = floor_height if floor_height is not None else float(trimmed[:, 1].min())
-        y_max = float(np.percentile(trimmed[:, 1], 98))
-        height = y_max - y_min
-
         label_counts: dict[str, int] = {}
         for i in member:
             label_counts[labels_2d[i]] = label_counts.get(labels_2d[i], 0) + 1
+        mean_confidence = float(np.mean([confidences[i] for i in member]))
 
-        instances.append(
-            BinInstance(
-                center=np.array([cx, (y_min + y_max) / 2, cz]),
-                size=np.array([length, height, width]),
-                yaw_deg=float(angle),
-                rect=rect,
-                n_views=len(member),
-                mean_confidence=float(np.mean([confidences[i] for i in member])),
-                labels=label_counts,
-                points=trimmed,
+        masks = _split_masks(trimmed[:, [0, 2]])
+        groups = masks if masks is not None else [np.ones(len(trimmed), dtype=bool)]
+        for group in groups:
+            segment = trimmed[group]
+            if len(segment) < MIN_SEGMENT_POINTS:
+                continue
+            instances.append(
+                _instance_from_points(
+                    segment, floor_height, len(member), mean_confidence, label_counts
+                )
             )
-        )
 
     instances.sort(key=lambda b: -b.n_views)
     return instances
