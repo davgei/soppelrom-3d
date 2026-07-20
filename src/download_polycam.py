@@ -41,15 +41,18 @@ RAW_OPTION_PATTERN = re.compile(r"raw|original|keyframe|source|data", re.IGNOREC
 
 
 def handle_download(download: Download) -> None:
-    name = download.suggested_filename
-    target = RAW_DIR / name
-    if target.exists():
-        print(f"  hopper over (finnes): {name}")
-        download.cancel()
-        return
-    download.save_as(target)
-    size_mb = target.stat().st_size / 1e6
-    print(f"  lagret: {name} ({size_mb:.1f} MB) -> data/raw")
+    try:
+        name = download.suggested_filename
+        print(f"  [nedlasting fanget] {name}  <- {download.url[:100]}", flush=True)
+        target = RAW_DIR / name
+        if target.exists():
+            print(f"  hopper over (finnes): {name}", flush=True)
+            return
+        download.save_as(target)
+        size_mb = target.stat().st_size / 1e6
+        print(f"  lagret: {name} ({size_mb:.1f} MB) -> data/raw", flush=True)
+    except Exception as error:
+        print(f"  (nedlasting kunne ikke lagres: {error})", flush=True)
 
 
 def attach_download_capture(context: BrowserContext) -> None:
@@ -65,6 +68,19 @@ def _wait_until_browser_closed(context: BrowserContext) -> None:
     try:
         while context.pages:
             context.pages[0].wait_for_timeout(500)
+    except Exception:
+        pass
+
+
+def _settle(page: Page, ms: int = 3000) -> None:
+    """Capture pages run a live 3D viewer, so they never reach 'networkidle'. Wait for the DOM
+    and then a fixed beat instead, and never let it raise."""
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=15000)
+    except Exception:
+        pass
+    try:
+        page.wait_for_timeout(ms)
     except Exception:
         pass
 
@@ -187,8 +203,7 @@ def dump_controls(page: Page, note: str) -> list[str]:
 def export_capture(page: Page, url: str) -> bool:
     """On a capture page: open export, choose raw data, trigger the download. Returns success."""
     page.goto(url)
-    page.wait_for_load_state("networkidle")
-    page.wait_for_timeout(1500)
+    _settle(page)
 
     clicked = False
     for pattern in (DOWNLOAD_BUTTON_PATTERN, re.compile(r"\.\.\.|more|meny", re.IGNORECASE)):
@@ -224,8 +239,7 @@ def run_dump(context: BrowserContext, url: str) -> None:
         return
     print(f"åpner første capture for å kartlegge eksport-menyen:\n  {urls[0]}")
     page.goto(urls[0])
-    page.wait_for_load_state("networkidle")
-    page.wait_for_timeout(1500)
+    _settle(page)
     dump_controls(page, "capture-side")
     for pattern in (DOWNLOAD_BUTTON_PATTERN, re.compile(r"\.\.\.|more|meny", re.IGNORECASE)):
         control = page.get_by_role("button", name=pattern)
