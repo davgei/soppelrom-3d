@@ -98,6 +98,47 @@ def freespace_topdown(result, out_path: str | Path, px_per_m: int = 100) -> None
     cv2.imwrite(str(Path(out_path)), image)
 
 
+def freespace_over_scene(
+    aligned_pcd: o3d.geometry.PointCloud,
+    result,
+    out_path: str | Path,
+    px_per_m: int = 100,
+    alpha: float = 0.45,
+) -> None:
+    """Top-down of the REAL colored scene with translucent green (free) / red (occupied) on top,
+    so the computed area can be checked against the actual floor texture."""
+    rows, cols = result.free.shape
+    cell, origin = result.cell, result.origin
+    points = np.asarray(aligned_pcd.points)
+    colors = np.asarray(aligned_pcd.colors)
+
+    col_idx = np.floor((points[:, 0] - origin[0]) / cell).astype(int)
+    row_idx = np.floor((points[:, 2] - origin[1]) / cell).astype(int)
+    inside = (col_idx >= 0) & (col_idx < cols) & (row_idx >= 0) & (row_idx < rows)
+    col_idx, row_idx = col_idx[inside], row_idx[inside]
+    p, c = points[inside], colors[inside]
+
+    order = np.argsort(p[:, 1])  # draw low first, higher points overwrite (top-down)
+    base = np.zeros((rows, cols, 3), np.uint8)
+    base[row_idx[order], col_idx[order]] = (c[order][:, ::-1] * 255).astype(np.uint8)  # RGB->BGR
+
+    overlay = base.copy()
+    overlay[result.free] = (40, 180, 40)
+    overlay[result.occupied] = (40, 40, 200)
+    mask = result.free | result.occupied
+    blended = base.copy()
+    blended[mask] = (base[mask] * (1 - alpha) + overlay[mask] * alpha).astype(np.uint8)
+
+    scale = max(int(px_per_m * cell), 1)
+    image = cv2.resize(blended, (cols * scale, rows * scale), interpolation=cv2.INTER_NEAREST)
+    image = np.ascontiguousarray(image[::-1])
+    cv2.putText(
+        image, f"Ledig gulv: {result.free_area_m2:.1f} m2", (10, 30),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (40, 220, 40), 2,
+    )
+    cv2.imwrite(str(Path(out_path)), image)
+
+
 def detections_topdown(
     pcd: o3d.geometry.PointCloud,
     instances,

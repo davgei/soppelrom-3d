@@ -146,3 +146,32 @@ def show_scene_o3d(
     o3d.visualization.draw_geometries(
         geometries, window_name=window_name, mesh_show_back_face=True
     )
+
+
+def show_freespace_o3d(
+    aligned_pcd: o3d.geometry.PointCloud,
+    result,
+    floor_height: float,
+    window_name: str = "Ledig gulv (gronn = ledig, rod = opptatt)",
+) -> None:
+    """Tint the actual floor points green where free / red where occupied, keep the rest as-is,
+    so you can orbit the real scene and see the free-area mapping directly on the floor."""
+    points = np.asarray(aligned_pcd.points)
+    colors = np.asarray(aligned_pcd.colors).copy()
+    cell, origin = result.cell, result.origin
+    rows, cols = result.free.shape
+
+    near_floor = np.abs(points[:, 1] - floor_height) < 0.12
+    col_idx = np.floor((points[:, 0] - origin[0]) / cell).astype(int)
+    row_idx = np.floor((points[:, 2] - origin[1]) / cell).astype(int)
+    valid = np.where(
+        near_floor & (col_idx >= 0) & (col_idx < cols) & (row_idx >= 0) & (row_idx < rows)
+    )[0]
+    is_free = result.free[row_idx[valid], col_idx[valid]]
+    is_occupied = result.occupied[row_idx[valid], col_idx[valid]]
+    colors[valid[is_free]] = [0.1, 0.8, 0.1]
+    colors[valid[is_occupied]] = [0.85, 0.1, 0.1]
+
+    tinted = o3d.geometry.PointCloud(aligned_pcd)
+    tinted.colors = o3d.utility.Vector3dVector(colors)
+    o3d.visualization.draw_geometries([tinted], window_name=window_name)

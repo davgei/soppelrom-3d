@@ -54,11 +54,14 @@ def main() -> None:
         fs_out = Path(args.render_dir) / "freespace_topdown.png"
         render.freespace_topdown(fs, fs_out)
         print(f"free-space preview -> {fs_out}")
+        scene_out = Path(args.render_dir) / "freespace_over_scene.png"
+        render.freespace_over_scene(aligned, fs, scene_out)
+        print(f"free-space over real scene -> {scene_out}")
 
     if args.view:
         from . import visualize
 
-        visualize.show_room(aligned, geometry)
+        visualize.show_freespace_o3d(aligned, fs, geometry.floor_height_m)
 
     archive.close()
 
