@@ -281,9 +281,9 @@ def dump_controls(page: Page, note: str) -> list[str]:
 
 
 def export_capture(page: Page, context: BrowserContext, url: str, fmt: str) -> bool:
-    """Real Polycam flow: click 'Download' -> the 'images' option (raw keyframe zip) ->
-    'Download now' if shown. The browser performs the actual download (its popup works); we've
-    redirected downloads to data/raw and just watch for the finished zip to appear."""
+    """Polycam Export dialog flow: click 'Download' (top bar) -> select the format tile
+    (e.g. 'Images', under the 'Other' column, below the fold) -> click the big 'Export' button.
+    The browser downloads the zip into data/raw (redirected via CDP); we watch for the file."""
     page.goto(url)
     _settle(page)
 
@@ -291,19 +291,25 @@ def export_capture(page: Page, context: BrowserContext, url: str, fmt: str) -> b
     if not download_button.count():
         return False
     download_button.first.click()
-    page.wait_for_timeout(1500)
+    page.wait_for_timeout(2000)  # let the Export dialog open
 
-    option = page.get_by_role("button", name=fmt)  # case-insensitive substring match
-    if not option.count():
-        print(f"  fant ikke '{fmt}' i nedlastingsmenyen")
+    tile = page.get_by_text(fmt, exact=True)
+    if not tile.count():
+        print(f"  fant ikke '{fmt}'-flisen i eksportdialogen")
         return False
+    try:
+        tile.first.scroll_into_view_if_needed(timeout=5000)
+    except Exception:
+        pass
+    tile.first.click()
+    page.wait_for_timeout(600)
 
     before = _snapshot_zips(WATCH_DIRS)
-    option.first.click()
-    page.wait_for_timeout(1000)
-    confirm = page.get_by_role("button", name="Download now", exact=True)
-    if confirm.count() and confirm.first.is_visible():
-        confirm.first.click()
+    export_button = page.get_by_role("button", name="Export", exact=True)
+    if not export_button.count():
+        print("  fant ikke Export-knappen")
+        return False
+    export_button.last.click()
 
     for i in range(150):
         found = _new_finished_zip(WATCH_DIRS, before)
@@ -425,8 +431,8 @@ def main() -> None:
                         help="bruk en helt vanlig Edge (omgår bot-deteksjon ved innlogging)")
     parser.add_argument("--url", default=LIBRARY_URL, help="bibliotek-URL")
     parser.add_argument("--limit", type=int, default=100000, help="maks antall skann (standard: alle)")
-    parser.add_argument("--format", default="images",
-                        help="knappen som lastes ned i auto-modus ('images' = raa keyframe-zip)")
+    parser.add_argument("--format", default="Images",
+                        help="format-flisen i eksportdialogen ('Images' = raa keyframe-zip)")
     args = parser.parse_args()
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
