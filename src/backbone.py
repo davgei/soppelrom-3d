@@ -56,6 +56,7 @@ class RoomGeometry:
     is_indoor: bool
     ceiling_coverage: float
     reason: str
+    rotation: np.ndarray | None = None  # gravity-align rotation (original -> aligned frame)
 
 
 def _find_horizontal_planes(
@@ -201,5 +202,6 @@ def analyze(
         is_indoor=is_indoor,
         ceiling_coverage=coverage,
         reason=reason,
+        rotation=rotation,
     )
     return geometry, aligned

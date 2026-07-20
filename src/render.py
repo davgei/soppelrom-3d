@@ -139,6 +139,58 @@ def freespace_over_scene(
     cv2.imwrite(str(Path(out_path)), image)
 
 
+def placements_over_scene(
+    aligned_pcd: o3d.geometry.PointCloud,
+    result,
+    out_path: str | Path,
+    px_per_m: int = 100,
+) -> None:
+    """Real scene top-down with the walkway (yellow), the entrance, and GREEN candidate boxes
+    where a new bin fits (open ground all around, off the path, reachable)."""
+    rows, cols = result.clearance.shape
+    cell, origin = result.cell, result.origin
+    points = np.asarray(aligned_pcd.points)
+    colors = np.asarray(aligned_pcd.colors)
+
+    col_idx = np.floor((points[:, 0] - origin[0]) / cell).astype(int)
+    row_idx = np.floor((points[:, 2] - origin[1]) / cell).astype(int)
+    inside = (col_idx >= 0) & (col_idx < cols) & (row_idx >= 0) & (row_idx < rows)
+    col_idx, row_idx, p, c = col_idx[inside], row_idx[inside], points[inside], colors[inside]
+    order = np.argsort(p[:, 1])
+    base = np.zeros((rows, cols, 3), np.uint8)
+    base[row_idx[order], col_idx[order]] = (c[order][:, ::-1] * 255).astype(np.uint8)
+    base[result.walkway] = (base[result.walkway] * 0.5 + np.array([0, 210, 210]) * 0.5).astype(np.uint8)
+
+    scale = max(int(px_per_m * cell), 1)
+    image = cv2.resize(base, (cols * scale, rows * scale), interpolation=cv2.INTER_NEAREST)
+    image = np.ascontiguousarray(image[::-1])
+    height_px = image.shape[0]
+
+    def to_px(x: float, z: float) -> tuple[int, int]:
+        return (
+            int((x - origin[0]) / cell * scale),
+            int(height_px - 1 - (z - origin[1]) / cell * scale),
+        )
+
+    for index, cand in enumerate(result.candidates, start=1):
+        corners = cv2.boxPoints(cand.rect)
+        pts = np.array([to_px(x, z) for x, z in corners], np.int32).reshape(-1, 1, 2)
+        cv2.polylines(image, [pts], isClosed=True, color=(60, 220, 60), thickness=2)
+        cx, cy = to_px(*cand.center_xz)
+        cv2.putText(image, str(index), (cx - 6, cy + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (60, 220, 60), 2)
+
+    if result.entrance_xz is not None:
+        ex, ey = to_px(*result.entrance_xz)
+        cv2.circle(image, (ex, ey), 9, (255, 0, 255), -1)
+        cv2.putText(image, "inngang", (ex + 10, ey), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+
+    cv2.putText(
+        image, f"{len(result.candidates)} plasser for {result.bin_type} (gul=gangsti)",
+        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (60, 220, 60), 2,
+    )
+    cv2.imwrite(str(Path(out_path)), image)
+
+
 def detections_topdown(
     pcd: o3d.geometry.PointCloud,
     instances,

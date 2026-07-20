@@ -4,7 +4,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from . import backbone, freespace, render
+import numpy as np
+
+from . import backbone, freespace, placement, render
+from .annotations import BIN_TYPES
 from .loader import load_point_cloud
 from .reconstruct import ReconstructionConfig
 
@@ -20,6 +23,9 @@ def main() -> None:
     parser.add_argument("--voxel", type=float, default=0.02)
     parser.add_argument("--min-confidence", type=int, default=1)
     parser.add_argument("--max-depth", type=float, default=8.0)
+    parser.add_argument("--place", default=None, choices=list(BIN_TYPES),
+                        help="find spots for a NEW bin of this type")
+    parser.add_argument("--margin", type=float, default=0.20, help="clearance margin around a new bin (m)")
     args = parser.parse_args()
 
     config = ReconstructionConfig(
@@ -47,6 +53,23 @@ def main() -> None:
     print(f"occupied on floor:          {fs.occupied_on_floor_m2:.1f} m^2")
     print(f"FREE floor area:            {fs.free_area_m2:.1f} m^2")
 
+    placement_result = None
+    if args.place:
+        length, _, width = BIN_TYPES[args.place]
+        rotation = geometry.rotation if geometry.rotation is not None else np.eye(3)
+        camera_world = np.array(
+            [archive.keyframe(ts).pose_cam_to_world[:3, 3] for ts in archive.timestamps]
+        )
+        camera_xz = (camera_world @ rotation.T)[:, [0, 2]]
+        placement_result = placement.find_placements(
+            fs, camera_xz, (length, width), args.place,
+            wall_angle_deg=footprint.angle_deg, margin=args.margin,
+        )
+        print(f"\n=== Plass til ny '{args.place}' ({length:.2f} x {width:.2f} m + {args.margin:.2f} m margin) ===")
+        print(f"mulige plasseringer: {len(placement_result.candidates)}")
+        for index, cand in enumerate(placement_result.candidates, start=1):
+            print(f"  #{index}: klaring {cand.clearance_m:.2f} m  @ ({cand.center_xz[0]:.2f}, {cand.center_xz[1]:.2f})")
+
     if args.render_dir:
         out = Path(args.render_dir) / "room_topdown.png"
         render.annotated_topdown(aligned, footprint, out)
@@ -57,11 +80,20 @@ def main() -> None:
         scene_out = Path(args.render_dir) / "freespace_over_scene.png"
         render.freespace_over_scene(aligned, fs, scene_out)
         print(f"free-space over real scene -> {scene_out}")
+        if placement_result is not None:
+            place_out = Path(args.render_dir) / "placements_over_scene.png"
+            render.placements_over_scene(aligned, placement_result, place_out)
+            print(f"placement preview -> {place_out}")
 
     if args.view:
         from . import visualize
 
-        visualize.show_freespace_o3d(aligned, fs, geometry.floor_height_m)
+        if placement_result is not None:
+            visualize.show_placements_o3d(
+                aligned, placement_result, geometry.floor_height_m, BIN_TYPES[args.place][1]
+            )
+        else:
+            visualize.show_freespace_o3d(aligned, fs, geometry.floor_height_m)
 
     archive.close()
 

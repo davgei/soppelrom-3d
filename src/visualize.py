@@ -148,6 +148,21 @@ def show_scene_o3d(
     )
 
 
+def show_placements_o3d(
+    aligned_pcd: o3d.geometry.PointCloud,
+    result,
+    floor_height: float,
+    bin_height: float = 1.15,
+    window_name: str = "Plass til ny kasse (gronn = kandidat)",
+) -> None:
+    """Orbit the real scene with green candidate boxes standing on the floor where a new bin fits."""
+    geometries: list = [aligned_pcd]
+    for cand in result.candidates:
+        box = bin_box_lineset(cand.rect, floor_height, floor_height + bin_height, color=(0.1, 0.9, 0.1))
+        geometries.append(box)
+    o3d.visualization.draw_geometries(geometries, window_name=window_name, mesh_show_back_face=True)
+
+
 def show_freespace_o3d(
     aligned_pcd: o3d.geometry.PointCloud,
     result,
