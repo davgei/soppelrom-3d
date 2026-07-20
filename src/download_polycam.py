@@ -330,18 +330,29 @@ def run_dump(context: BrowserContext, url: str) -> None:
     print(f"\nfant {len(urls)} captures i biblioteket")
     if not urls:
         return
-    print(f"åpner første capture for å kartlegge eksport-menyen:\n  {urls[0]}")
+    shots = PROJECT_ROOT / "outputs"
+    shots.mkdir(parents=True, exist_ok=True)
+    print(f"åpner første capture:\n  {urls[0]}")
     page.goto(urls[0])
     _settle(page)
+    try:
+        page.screenshot(path=str(shots / "polycam_capture.png"))
+    except Exception as error:
+        print(f"  (skjermbilde feilet: {error})")
     dump_controls(page, "capture-side")
-    for pattern in (DOWNLOAD_BUTTON_PATTERN, re.compile(r"\.\.\.|more|meny", re.IGNORECASE)):
-        control = page.get_by_role("button", name=pattern)
-        if control.count():
-            control.first.click()
-            page.wait_for_timeout(1200)
-            dump_controls(page, "etter klikk paa eksport/meny")
-            break
-    print("\nLim inn listen over kontroller over, saa laaser jeg selektorene i auto-modus.")
+
+    download = page.get_by_role("button", name="Download", exact=True)
+    if download.count():
+        download.first.click()
+        page.wait_for_timeout(2500)
+        try:
+            page.screenshot(path=str(shots / "polycam_download_panel.png"), full_page=True)
+            print(f"  skjermbilde av nedlastingsmenyen -> {shots / 'polycam_download_panel.png'}")
+        except Exception as error:
+            print(f"  (skjermbilde feilet: {error})")
+        dump_controls(page, "etter klikk paa Download")
+
+    print("\nSkjermbilder lagret i outputs/. Send dem, saa ser jeg menyen og laaser 'images'.")
     input("Trykk Enter for aa lukke ... ")
 
 
