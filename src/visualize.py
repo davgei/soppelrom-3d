@@ -191,6 +191,9 @@ def show_placements_o3d(
 ) -> None:
     """Free/occupied carpet on the floor PLUS candidate boxes (blue, to stand out from the carpet)."""
     geometries: list = [_tinted_floor_cloud(aligned_pcd, fs, floor_height)]
+    for bx, bz, bl, bw, byaw in result.existing_bins:
+        rect = ((bx, bz), (bl, bw), byaw)
+        geometries.append(bin_box_lineset(rect, floor_height, floor_height + bin_height, color=(1.0, 0.1, 0.1)))
     for cand in result.candidates:
         box = bin_box_lineset(cand.rect, floor_height, floor_height + bin_height, color=(0.1, 0.4, 1.0))
         geometries.append(box)

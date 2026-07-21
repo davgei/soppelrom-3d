@@ -7,9 +7,33 @@ from pathlib import Path
 import numpy as np
 
 from . import backbone, freespace, placement, render
-from .annotations import BIN_TYPES
+from .annotations import BIN_TYPES, load_annotations
 from .loader import load_point_cloud
 from .reconstruct import ReconstructionConfig
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ANNOTATION_DIR = PROJECT_ROOT / "outputs" / "annotations"
+CACHE_ROOT = PROJECT_ROOT / "outputs" / "cache"
+
+
+def _load_existing_bins(
+    scan_stem: str, rotation: np.ndarray
+) -> list[tuple[float, float, float, float, float]]:
+    """Approved annotations if present, else the cached auto-proposals, transformed to the
+    gravity-aligned frame as (cx, cz, length, width, yaw)."""
+    annotated = ANNOTATION_DIR / f"{scan_stem}.json"
+    proposals = CACHE_ROOT / scan_stem / "proposals.json"
+    path = annotated if annotated.exists() else (proposals if proposals.exists() else None)
+    if path is None:
+        return []
+    _, boxes = load_annotations(path)
+    result = []
+    for box in boxes:
+        center = rotation @ np.asarray(box.center)
+        length = max(box.extent[0], box.extent[2])
+        width = min(box.extent[0], box.extent[2])
+        result.append((float(center[0]), float(center[2]), float(length), float(width), float(box.yaw_deg)))
+    return result
 
 
 def main() -> None:
@@ -61,10 +85,12 @@ def main() -> None:
             [archive.keyframe(ts).pose_cam_to_world[:3, 3] for ts in archive.timestamps]
         )
         camera_xz = (camera_world @ rotation.T)[:, [0, 2]]
+        existing_bins = _load_existing_bins(Path(args.scan).stem, rotation)
         placement_result = placement.find_placements(
             fs, camera_xz, (length, width), args.place,
-            wall_angle_deg=footprint.angle_deg, margin=args.margin,
+            wall_angle_deg=footprint.angle_deg, margin=args.margin, existing_bins=existing_bins,
         )
+        print(f"tar hensyn til {len(existing_bins)} eksisterende kasse(r)")
         print(f"\n=== Plass til ny '{args.place}' ({length:.2f} x {width:.2f} m + {args.margin:.2f} m margin) ===")
         print(f"mulige plasseringer: {len(placement_result.candidates)}")
         for index, cand in enumerate(placement_result.candidates, start=1):

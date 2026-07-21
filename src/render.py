@@ -172,6 +172,11 @@ def placements_over_scene(
             int(height_px - 1 - (z - origin[1]) / cell * scale),
         )
 
+    for bx, bz, bl, bw, byaw in result.existing_bins:
+        corners = cv2.boxPoints(((bx, bz), (bl, bw), byaw))
+        pts = np.array([to_px(x, z) for x, z in corners], np.int32).reshape(-1, 1, 2)
+        cv2.polylines(image, [pts], isClosed=True, color=(0, 0, 235), thickness=2)
+
     for index, cand in enumerate(result.candidates, start=1):
         corners = cv2.boxPoints(cand.rect)
         pts = np.array([to_px(x, z) for x, z in corners], np.int32).reshape(-1, 1, 2)
@@ -185,8 +190,8 @@ def placements_over_scene(
         cv2.putText(image, "inngang", (ex + 10, ey), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
 
     cv2.putText(
-        image, f"{len(result.candidates)} plasser for {result.bin_type} (gul=gangsti)",
-        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (60, 220, 60), 2,
+        image, f"{len(result.candidates)} nye plasser (gronn) | eksisterende (rod) | gul=gangsti",
+        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (60, 220, 60), 2,
     )
     cv2.imwrite(str(Path(out_path)), image)
 

@@ -36,6 +36,7 @@ class PlacementResult:
     candidates: list[Candidate]
     entrance_xz: tuple[float, float] | None
     bin_type: str
+    existing_bins: list[tuple[float, float, float, float, float]]
 
 
 def _to_cells(points_xz: np.ndarray, origin: np.ndarray, cell: float, shape: tuple[int, int]):
@@ -52,14 +53,23 @@ def find_placements(
     bin_type: str,
     wall_angle_deg: float = 0.0,
     margin: float = 0.20,
+    existing_bins: list[tuple[float, float, float, float, float]] | None = None,
     entrance_clear_radius: float = 1.0,
+    pull_out_lane: float = 1.0,
     spacing: float = 0.15,
     max_candidates: int = 12,
 ) -> PlacementResult:
+    """existing_bins: (cx, cz, length, width, yaw_deg) per already-present bin, in the aligned frame.
+    New bins line up NEXT TO them (ranked by proximity) and never sit in their pull-out lane."""
+    existing_bins = existing_bins or []
     cell, origin = fs.cell, fs.origin
     free = fs.free.copy()
     rows, cols = free.shape
     length, width = footprint_lw
+
+    yy, xx = np.mgrid[0:rows, 0:cols]
+    wx = origin[0] + (xx + 0.5) * cell
+    wz = origin[1] + (yy + 0.5) * cell
 
     # accessibility: free floor connected to where the scanner walked (else the largest region)
     walkway = np.zeros_like(free, dtype=bool)
@@ -83,10 +93,26 @@ def find_placements(
     if len(camera_xz):
         entrance = camera_xz[: min(10, len(camera_xz))].mean(axis=0)
         entrance_xz = (float(entrance[0]), float(entrance[1]))
-        yy, xx = np.mgrid[0:rows, 0:cols]
-        wx = origin[0] + (xx + 0.5) * cell
-        wz = origin[1] + (yy + 0.5) * cell
         free_acc = free_acc & (np.hypot(wx - entrance[0], wz - entrance[1]) >= entrance_clear_radius)
+
+    # keep existing bins' footprints and their pull-out lane (toward the exit) clear
+    if existing_bins:
+        occupied = np.zeros((rows, cols), np.uint8)
+        target = np.array(entrance_xz) if entrance_xz is not None else np.array([wx.mean(), wz.mean()])
+        apron = np.zeros((rows, cols), dtype=bool)
+        for bx, bz, bl, bw, byaw in existing_bins:
+            box = cv2.boxPoints(((bx, bz), (bl + 0.15, bw + 0.15), byaw))
+            pts = np.stack([(box[:, 0] - origin[0]) / cell, (box[:, 1] - origin[1]) / cell], axis=1)
+            cv2.fillPoly(occupied, [pts.astype(np.int32)], 1)
+            direction = target - np.array([bx, bz])
+            norm = np.linalg.norm(direction)
+            if norm < 1e-6:
+                continue
+            direction /= norm
+            along = (wx - bx) * direction[0] + (wz - bz) * direction[1]
+            perp = np.abs(-(wx - bx) * direction[1] + (wz - bz) * direction[0])
+            apron |= (along > -0.1) & (along < pull_out_lane) & (perp <= max(bw, width) / 2 + 0.1)
+        free_acc = free_acc & (occupied == 0) & (~apron)
 
     # rotate to wall-aligned frame, then a rectangle erosion = "the footprint+margin fits here"
     rotation = cv2.getRotationMatrix2D((cols / 2.0, rows / 2.0), wall_angle_deg, 1.0)
@@ -100,21 +126,25 @@ def find_placements(
     ys, xs = np.where(fits > 0)
     candidates: list[Candidate] = []
     if len(xs):
-        order = np.argsort(clearance_rot[ys, xs])  # ascending -> hug walls, keep the middle open
+        world_x = origin[0] + (inverse[0, 0] * xs + inverse[0, 1] * ys + inverse[0, 2] + 0.5) * cell
+        world_z = origin[1] + (inverse[1, 0] * xs + inverse[1, 1] * ys + inverse[1, 2] + 0.5) * cell
+        if existing_bins:
+            ex = np.array([[b[0], b[1]] for b in existing_bins])
+            nearest = np.min(np.hypot(world_x[:, None] - ex[:, 0], world_z[:, None] - ex[:, 1]), axis=1)
+            order = np.argsort(nearest)  # snap next to existing bins first (extend the row)
+        else:
+            order = np.argsort(clearance_rot[ys, xs])  # else hug walls, keep the middle open
         taken = np.zeros_like(fits, dtype=bool)
         exclusion = max(1, int(round((max(length, width) + spacing) / cell)))
         for k in order:
             r0, c0 = int(ys[k]), int(xs[k])
             if taken[r0, c0]:
                 continue
-            ox = inverse[0, 0] * c0 + inverse[0, 1] * r0 + inverse[0, 2]
-            oy = inverse[1, 0] * c0 + inverse[1, 1] * r0 + inverse[1, 2]
-            cx = origin[0] + (ox + 0.5) * cell
-            cz = origin[1] + (oy + 0.5) * cell
+            cx, cz = float(world_x[k]), float(world_z[k])
             candidates.append(
                 Candidate(
-                    center_xz=(float(cx), float(cz)),
-                    rect=((float(cx), float(cz)), (float(length), float(width)), float(wall_angle_deg)),
+                    center_xz=(cx, cz),
+                    rect=((cx, cz), (float(length), float(width)), float(wall_angle_deg)),
                     length_m=float(length),
                     width_m=float(width),
                     clearance_m=float(clearance_rot[r0, c0]),
@@ -133,4 +163,5 @@ def find_placements(
         candidates=candidates,
         entrance_xz=entrance_xz,
         bin_type=bin_type,
+        existing_bins=existing_bins,
     )
