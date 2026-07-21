@@ -46,23 +46,20 @@ def _to_cells(points_xz: np.ndarray, origin: np.ndarray, cell: float, shape: tup
     return rows[inside], cols[inside]
 
 
-def detect_entrances(
+def build_wall_mask(
     fs: FreeSpaceResult,
-    footprint,
     points: np.ndarray,
     floor_height: float,
-    camera_xz: np.ndarray,
     existing_bins: list[tuple[float, float, float, float, float]] | None = None,
     wall_height: float = 1.0,
-    min_gap_m: float = 0.5,
-) -> list[tuple[float, float]]:
-    """Auto-find doorways: gaps in the wall ring around the room where the floor leaks out and
-    the scanner actually walked (that last part rejects ragged scan edges). Best-effort; the
-    manual click overrides it."""
+    min_wall_extent: float = 1.2,
+) -> np.ndarray:
+    """Grid cells that are WALL: tall structure (a point >wall_height above the floor) that is
+    not an existing bin, keeping only long connected runs (real walls, not scattered vegetation
+    or clutter). Prefer feeding the watertight Poisson vertices so unscanned holes don't read
+    as gaps."""
     cell, origin = fs.cell, fs.origin
     rows, cols = fs.free.shape
-    floor_region = footprint.mask.astype(bool)
-
     height_map = np.zeros((rows, cols))
     height = points[:, 1] - floor_height
     col = np.floor((points[:, 0] - origin[0]) / cell).astype(int)
@@ -76,7 +73,31 @@ def detect_entrances(
         box = cv2.boxPoints(((bx, bz), (bl + 0.25, bw + 0.25), byaw))
         pts = np.stack([(box[:, 0] - origin[0]) / cell, (box[:, 1] - origin[1]) / cell], axis=1)
         cv2.fillPoly(bins_mask, [pts.astype(np.int32)], 1)
-    wall = wall & (bins_mask == 0)  # tall structure that is not a bin = wall
+    wall = wall & (bins_mask == 0)
+
+    labels, n = label(wall)  # keep only long runs = real walls
+    for i in range(1, n + 1):
+        cells = np.argwhere(labels == i)
+        extent = (cells.max(axis=0) - cells.min(axis=0) + 1) * cell
+        if max(extent) < min_wall_extent:
+            wall[labels == i] = False
+    return wall
+
+
+def detect_entrances(
+    fs: FreeSpaceResult,
+    footprint,
+    wall_mask: np.ndarray,
+    camera_xz: np.ndarray,
+    min_gap_m: float = 0.5,
+) -> list[tuple[float, float]]:
+    """Auto-find doorways: gaps in the wall ring around the room where the floor leaks out and
+    the scanner actually walked (that last part rejects ragged scan edges). Best-effort; the
+    manual click overrides it."""
+    cell, origin = fs.cell, fs.origin
+    rows, cols = fs.free.shape
+    floor_region = footprint.mask.astype(bool)
+    wall = wall_mask
 
     ring = max(1, int(0.4 / cell))
     outer = binary_dilation(floor_region, iterations=ring) & ~floor_region
@@ -105,11 +126,137 @@ def detect_entrances(
     return entrances
 
 
+def _box_corners(center, wall_dir, inward, along, into) -> np.ndarray:
+    return np.array(
+        [
+            center - wall_dir * along / 2 - inward * into / 2,
+            center - wall_dir * along / 2 + inward * into / 2,
+            center + wall_dir * along / 2 + inward * into / 2,
+            center + wall_dir * along / 2 - inward * into / 2,
+        ]
+    )
+
+
+def _box_fits(allowed: np.ndarray, corners: np.ndarray, origin: np.ndarray, cell: float) -> bool:
+    mask = np.zeros(allowed.shape, np.uint8)
+    pts = np.stack([(corners[:, 0] - origin[0]) / cell, (corners[:, 1] - origin[1]) / cell], axis=1)
+    cv2.fillPoly(mask, [pts.astype(np.int32).reshape(-1, 1, 2)], 1)
+    covered = mask.astype(bool)
+    return bool(covered.any()) and not bool(np.any(covered & ~allowed))
+
+
+def _wall_candidates(
+    free_acc: np.ndarray,
+    wall_mask: np.ndarray,
+    length: float,
+    width: float,
+    origin: np.ndarray,
+    cell: float,
+    spacing: float,
+    max_candidates: int,
+    wall_gap: float = 0.10,
+) -> list[Candidate]:
+    """Place bins hugging the ACTUAL walls: a bin sits where the distance to the nearest wall
+    equals length/2 + gap (its short side then rests against the wall), oriented by the wall
+    normal so it sticks `length` into the room and spans `width` along the wall. Greedy along
+    each wall so they sit next to each other with a small gap."""
+    if wall_mask is None or not wall_mask.any():
+        return []
+    distance, (row_idx, col_idx) = distance_transform_edt(~wall_mask, return_indices=True)
+    distance_m = distance * cell
+    rows, cols = free_acc.shape
+    yy, xx = np.mgrid[0:rows, 0:cols]
+    dir_col = xx - col_idx  # world X points along columns
+    dir_row = yy - row_idx  # world Z points along rows
+
+    target = length / 2 + wall_gap
+    band = free_acc & (np.abs(distance_m - target) < cell * 1.5)
+    ys, xs = np.where(band)
+    if not len(xs):
+        return []
+
+    taken = np.zeros(free_acc.shape, dtype=bool)
+    dilate = max(1, int(spacing / cell))
+    candidates: list[Candidate] = []
+    for k in np.argsort(np.abs(distance_m[ys, xs] - target)):
+        r0, c0 = int(ys[k]), int(xs[k])
+        if taken[r0, c0]:
+            continue
+        inward = np.array([dir_col[r0, c0], dir_row[r0, c0]], dtype=float)  # (x, z), wall -> room
+        norm = np.linalg.norm(inward)
+        if norm < 1e-6:
+            continue
+        inward /= norm
+        wall_dir = np.array([-inward[1], inward[0]])
+        ctr = np.array([origin[0] + (c0 + 0.5) * cell, origin[1] + (r0 + 0.5) * cell])
+        box = _box_corners(ctr, wall_dir, inward, width, length)
+        if _box_fits(free_acc & ~taken, box, origin, cell):
+            rect = cv2.minAreaRect(box.astype(np.float32))
+            candidates.append(Candidate((float(ctr[0]), float(ctr[1])), rect, float(length), float(width), float(distance_m[r0, c0])))
+            mask = np.zeros(free_acc.shape, np.uint8)
+            bpts = np.stack([(box[:, 0] - origin[0]) / cell, (box[:, 1] - origin[1]) / cell], axis=1)
+            cv2.fillPoly(mask, [bpts.astype(np.int32).reshape(-1, 1, 2)], 1)
+            taken |= binary_dilation(mask.astype(bool), iterations=dilate)
+            if len(candidates) >= max_candidates:
+                break
+    return candidates
+
+
+def _open_floor_candidates(
+    free_acc: np.ndarray,
+    wall_angle_deg: float,
+    length: float,
+    width: float,
+    margin: float,
+    origin: np.ndarray,
+    cell: float,
+    existing_bins: list,
+    spacing: float,
+    max_candidates: int,
+) -> list[Candidate]:
+    """Fallback when no wall spots exist: erode the free floor by the footprint and pick the
+    most wall-hugging fits."""
+    rows, cols = free_acc.shape
+    rotation = cv2.getRotationMatrix2D((cols / 2.0, rows / 2.0), wall_angle_deg, 1.0)
+    rotated = cv2.warpAffine((free_acc.astype(np.uint8)) * 255, rotation, (cols, rows), flags=cv2.INTER_NEAREST)
+    kx = max(1, int(round((length + 2 * margin) / cell)))
+    ky = max(1, int(round((width + 2 * margin) / cell)))
+    fits = cv2.erode(rotated, np.ones((ky, kx), np.uint8))
+    clearance_rot = distance_transform_edt(rotated > 0) * cell
+    inverse = cv2.invertAffineTransform(rotation)
+
+    ys, xs = np.where(fits > 0)
+    candidates: list[Candidate] = []
+    if not len(xs):
+        return candidates
+    world_x = origin[0] + (inverse[0, 0] * xs + inverse[0, 1] * ys + inverse[0, 2] + 0.5) * cell
+    world_z = origin[1] + (inverse[1, 0] * xs + inverse[1, 1] * ys + inverse[1, 2] + 0.5) * cell
+    score = clearance_rot[ys, xs].copy()
+    if existing_bins:
+        ex = np.array([[b[0], b[1]] for b in existing_bins])
+        nearest = np.min(np.hypot(world_x[:, None] - ex[:, 0], world_z[:, None] - ex[:, 1]), axis=1)
+        score = clearance_rot[ys, xs] + 0.3 * nearest
+    taken = np.zeros_like(fits, dtype=bool)
+    exclusion = max(1, int(round((max(length, width) + spacing) / cell)))
+    for k in np.argsort(score):
+        r0, c0 = int(ys[k]), int(xs[k])
+        if taken[r0, c0]:
+            continue
+        cx, cz = float(world_x[k]), float(world_z[k])
+        candidates.append(Candidate((cx, cz), ((cx, cz), (float(length), float(width)), float(wall_angle_deg)),
+                                     float(length), float(width), float(clearance_rot[r0, c0])))
+        taken[max(0, r0 - exclusion):r0 + exclusion, max(0, c0 - exclusion):c0 + exclusion] = True
+        if len(candidates) >= max_candidates:
+            break
+    return candidates
+
+
 def find_placements(
     fs: FreeSpaceResult,
     camera_xz: np.ndarray,
     footprint_lw: tuple[float, float],
     bin_type: str,
+    wall_mask: np.ndarray | None = None,
     wall_angle_deg: float = 0.0,
     margin: float = 0.20,
     existing_bins: list[tuple[float, float, float, float, float]] | None = None,
@@ -178,46 +325,16 @@ def find_placements(
             apron |= (along > -0.1) & (along < pull_out_lane) & (perp <= max(bw, width) / 2 + 0.1)
         free_acc = free_acc & (occupied == 0) & (~apron)
 
-    # rotate to wall-aligned frame, then a rectangle erosion = "the footprint+margin fits here"
-    rotation = cv2.getRotationMatrix2D((cols / 2.0, rows / 2.0), wall_angle_deg, 1.0)
-    rotated = cv2.warpAffine((free_acc.astype(np.uint8)) * 255, rotation, (cols, rows), flags=cv2.INTER_NEAREST)
-    kx = max(1, int(round((length + 2 * margin) / cell)))
-    ky = max(1, int(round((width + 2 * margin) / cell)))
-    fits = cv2.erode(rotated, np.ones((ky, kx), np.uint8))
-    clearance_rot = distance_transform_edt(rotated > 0) * cell
-    inverse = cv2.invertAffineTransform(rotation)
-
-    ys, xs = np.where(fits > 0)
-    candidates: list[Candidate] = []
-    if len(xs):
-        world_x = origin[0] + (inverse[0, 0] * xs + inverse[0, 1] * ys + inverse[0, 2] + 0.5) * cell
-        world_z = origin[1] + (inverse[1, 0] * xs + inverse[1, 1] * ys + inverse[1, 2] + 0.5) * cell
-        clearance_here = clearance_rot[ys, xs]
-        score = clearance_here.copy()  # low clearance = right against a wall = preferred
-        if existing_bins:
-            ex = np.array([[b[0], b[1]] for b in existing_bins])
-            nearest = np.min(np.hypot(world_x[:, None] - ex[:, 0], world_z[:, None] - ex[:, 1]), axis=1)
-            score = clearance_here + 0.3 * nearest  # wall-hug first, then extend the existing row
-        order = np.argsort(score)
-        taken = np.zeros_like(fits, dtype=bool)
-        exclusion = max(1, int(round((max(length, width) + spacing) / cell)))
-        for k in order:
-            r0, c0 = int(ys[k]), int(xs[k])
-            if taken[r0, c0]:
-                continue
-            cx, cz = float(world_x[k]), float(world_z[k])
-            candidates.append(
-                Candidate(
-                    center_xz=(cx, cz),
-                    rect=((cx, cz), (float(length), float(width)), float(wall_angle_deg)),
-                    length_m=float(length),
-                    width_m=float(width),
-                    clearance_m=float(clearance_rot[r0, c0]),
-                )
-            )
-            taken[max(0, r0 - exclusion):r0 + exclusion, max(0, c0 - exclusion):c0 + exclusion] = True
-            if len(candidates) >= max_candidates:
-                break
+    # 1) preferred: line the bins up along the walls, short side to the wall
+    candidates = _wall_candidates(
+        free_acc, wall_mask, length, width, origin, cell, spacing, max_candidates
+    )
+    # 2) fallback (no wall spots): most wall-hugging open-floor fits
+    if not candidates:
+        candidates = _open_floor_candidates(
+            free_acc, wall_angle_deg, length, width, margin, origin, cell,
+            existing_bins, spacing, max_candidates,
+        )
 
     return PlacementResult(
         cell=cell,

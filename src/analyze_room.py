@@ -87,24 +87,25 @@ def main() -> None:
         )
         camera_xz = (camera_world @ rotation.T)[:, [0, 2]]
         existing_bins = _load_existing_bins(Path(args.scan).stem, rotation)
+
+        # walls from the watertight Poisson mesh (cached) so unscanned holes aren't read as gaps
+        poisson_path = CACHE_ROOT / Path(args.scan).stem / "mesh_poisson.ply"
+        if poisson_path.exists():
+            mesh = o3d.io.read_triangle_mesh(str(poisson_path))
+            wall_points = np.asarray(mesh.vertices) @ rotation.T
+        else:
+            wall_points = np.asarray(aligned.points)
+        wall_mask = placement.build_wall_mask(fs, wall_points, geometry.floor_height_m, existing_bins)
+
         clicked = set_entrance.load_entrances(Path(args.scan).stem)
         if clicked:
             entrances, source = clicked, "klikket av deg"
         else:
-            # walls from the watertight Poisson mesh (cached), so unscanned holes in a wall
-            # aren't mistaken for a doorway; fall back to the raw cloud if no mesh
-            poisson_path = CACHE_ROOT / Path(args.scan).stem / "mesh_poisson.ply"
-            if poisson_path.exists():
-                mesh = o3d.io.read_triangle_mesh(str(poisson_path))
-                wall_points = np.asarray(mesh.vertices) @ rotation.T
-            else:
-                wall_points = np.asarray(aligned.points)
-            entrances = placement.detect_entrances(
-                fs, footprint, wall_points, geometry.floor_height_m, camera_xz, existing_bins,
-            )
+            entrances = placement.detect_entrances(fs, footprint, wall_mask, camera_xz)
             source = "auto-funnet (poisson-vegger)"
+
         placement_result = placement.find_placements(
-            fs, camera_xz, (length, width), args.place,
+            fs, camera_xz, (length, width), args.place, wall_mask=wall_mask,
             wall_angle_deg=footprint.angle_deg, margin=args.margin, existing_bins=existing_bins,
             entrance_override=entrances,
         )
@@ -116,6 +117,7 @@ def main() -> None:
             print(f"  #{index}: klaring {cand.clearance_m:.2f} m  @ ({cand.center_xz[0]:.2f}, {cand.center_xz[1]:.2f})")
 
     if args.render_dir:
+        Path(args.render_dir).mkdir(parents=True, exist_ok=True)
         out = Path(args.render_dir) / "room_topdown.png"
         render.annotated_topdown(aligned, footprint, out)
         print(f"\nannotated preview -> {out}")
