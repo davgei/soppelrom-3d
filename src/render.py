@@ -184,8 +184,8 @@ def placements_over_scene(
         cx, cy = to_px(*cand.center_xz)
         cv2.putText(image, str(index), (cx - 6, cy + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (60, 220, 60), 2)
 
-    if result.entrance_xz is not None:
-        ex, ey = to_px(*result.entrance_xz)
+    for ent in result.entrances:
+        ex, ey = to_px(*ent)
         cv2.circle(image, (ex, ey), 9, (255, 0, 255), -1)
         cv2.putText(image, "inngang", (ex + 10, ey), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
 

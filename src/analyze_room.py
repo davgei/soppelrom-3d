@@ -86,14 +86,22 @@ def main() -> None:
         )
         camera_xz = (camera_world @ rotation.T)[:, [0, 2]]
         existing_bins = _load_existing_bins(Path(args.scan).stem, rotation)
-        entrance_override = set_entrance.load_entrance(Path(args.scan).stem)
+        clicked = set_entrance.load_entrances(Path(args.scan).stem)
+        if clicked:
+            entrances, source = clicked, "klikket av deg"
+        else:
+            entrances = placement.detect_entrances(
+                fs, footprint, np.asarray(aligned.points), geometry.floor_height_m,
+                camera_xz, existing_bins,
+            )
+            source = "auto-funnet"
         placement_result = placement.find_placements(
             fs, camera_xz, (length, width), args.place,
             wall_angle_deg=footprint.angle_deg, margin=args.margin, existing_bins=existing_bins,
-            entrance_override=entrance_override,
+            entrance_override=entrances,
         )
-        source = "din klikkede inngang" if entrance_override is not None else "auto (skann-start)"
-        print(f"tar hensyn til {len(existing_bins)} eksisterende kasse(r); inngang: {source}")
+        print(f"tar hensyn til {len(existing_bins)} eksisterende kasse(r); "
+              f"{len(placement_result.entrances)} inngang(er) ({source})")
         print(f"\n=== Plass til ny '{args.place}' ({length:.2f} x {width:.2f} m + {args.margin:.2f} m margin) ===")
         print(f"mulige plasseringer: {len(placement_result.candidates)}")
         for index, cand in enumerate(placement_result.candidates, start=1):

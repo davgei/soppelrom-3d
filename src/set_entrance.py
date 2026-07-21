@@ -22,12 +22,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ENTRANCE_DIR = PROJECT_ROOT / "outputs" / "entrances"
 
 
-def load_entrance(scan_stem: str) -> tuple[float, float] | None:
+def load_entrances(scan_stem: str) -> list[tuple[float, float]]:
     path = ENTRANCE_DIR / f"{scan_stem}.json"
-    if path.exists():
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return (float(data["entrance_xz"][0]), float(data["entrance_xz"][1]))
-    return None
+    if not path.exists():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if "entrances_xz" in data:
+        return [(float(x), float(z)) for x, z in data["entrances_xz"]]
+    if "entrance_xz" in data:  # backward compatibility with the single-point format
+        return [(float(data["entrance_xz"][0]), float(data["entrance_xz"][1]))]
+    return []
 
 
 def main() -> None:
@@ -41,9 +45,9 @@ def main() -> None:
     )
     _, aligned = backbone.analyze(pcd)
 
-    print("SHIFT+KLIKK paa inngangen/doren i vinduet, lukk vinduet naar du er ferdig.")
+    print("SHIFT+KLIKK paa hver inngang/dor i vinduet (flere er ok), lukk vinduet naar du er ferdig.")
     vis = o3d.visualization.VisualizerWithEditing()
-    vis.create_window(window_name="Shift+klikk paa inngangen")
+    vis.create_window(window_name="Shift+klikk paa inngangene")
     vis.add_geometry(aligned)
     vis.run()
     vis.destroy_window()
@@ -54,11 +58,12 @@ def main() -> None:
         archive.close()
         return
 
-    point = np.asarray(aligned.points)[picked[-1]]
+    points_xyz = np.asarray(aligned.points)[picked]
+    entrances = [[float(p[0]), float(p[2])] for p in points_xyz]
     ENTRANCE_DIR.mkdir(parents=True, exist_ok=True)
     out = ENTRANCE_DIR / f"{Path(args.scan).stem}.json"
-    out.write_text(json.dumps({"entrance_xz": [float(point[0]), float(point[2])]}, indent=2), encoding="utf-8")
-    print(f"inngang lagret: X={point[0]:.2f}  Z={point[2]:.2f}  -> {out}")
+    out.write_text(json.dumps({"entrances_xz": entrances}, indent=2), encoding="utf-8")
+    print(f"{len(entrances)} inngang(er) lagret -> {out}")
     archive.close()
 
 
