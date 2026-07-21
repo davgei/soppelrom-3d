@@ -1082,7 +1082,20 @@ class AnnotationApp:
 
 
 def main() -> None:
-    AnnotationApp().run()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Søppelrom 3D-annotering")
+    parser.add_argument("--scan", default=None, help="stem eller sti til skannet som skal åpnes først")
+    args = parser.parse_args()
+
+    app = AnnotationApp()
+    if args.scan:
+        target = Path(args.scan).stem
+        stems = [s.stem for s in app.scans]
+        if target in stems:
+            app.scan_index = stems.index(target)
+            app._load_scan()
+    app.run()
 
 
 if __name__ == "__main__":

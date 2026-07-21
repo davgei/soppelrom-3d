@@ -45,6 +45,20 @@ Nyttige flagg: `--view` (åpne Rerun), `--render-dir <dir>` (ortho-previews),
 .venv\Scripts\python.exe -m src.annotate3d                                        # annoteringsverktøy
 ```
 
+## Kontrollpanel (meny/GUI)
+
+```
+.venv\Scripts\python.exe -m src.dashboard
+```
+
+Én meny for alt: liste over alle skann (status: rå / klar / annotert), og for det valgte
+skannet ser du resultatbildene — **Rom + mål**, **Ledig gulv**, **Plassering (ny kasse)** —
+med kassetype-velger og en statistikk-linje (adresse, mål, inne/ute, antall kasser, ledig
+areal, mulige nye plasser). Knapper: Generer bilder (denne / alle), Åpne i 3D, Annotér,
+Sett inngang, Forbered. Pil venstre/høyre blar mellom skann. Ingen zip-navn i terminalen.
+
+## Annotering (Fase 2)
+
 Annoteringsverktøyet viser Poisson-meshen med forslags-bokser fra zero-shot-deteksjonen
 (oransje = forslag, grønn = godkjent, blå = valgt). CAD-stil: «Tegn boks» = klikk to
 hjørner på gulvet, trykk for dybde og dra opp for høyde. Valgt boks har håndtak —
