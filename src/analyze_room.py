@@ -5,6 +5,7 @@ import argparse
 from pathlib import Path
 
 import numpy as np
+import open3d as o3d
 
 from . import backbone, freespace, placement, render, set_entrance
 from .annotations import BIN_TYPES, load_annotations
@@ -90,11 +91,18 @@ def main() -> None:
         if clicked:
             entrances, source = clicked, "klikket av deg"
         else:
+            # walls from the watertight Poisson mesh (cached), so unscanned holes in a wall
+            # aren't mistaken for a doorway; fall back to the raw cloud if no mesh
+            poisson_path = CACHE_ROOT / Path(args.scan).stem / "mesh_poisson.ply"
+            if poisson_path.exists():
+                mesh = o3d.io.read_triangle_mesh(str(poisson_path))
+                wall_points = np.asarray(mesh.vertices) @ rotation.T
+            else:
+                wall_points = np.asarray(aligned.points)
             entrances = placement.detect_entrances(
-                fs, footprint, np.asarray(aligned.points), geometry.floor_height_m,
-                camera_xz, existing_bins,
+                fs, footprint, wall_points, geometry.floor_height_m, camera_xz, existing_bins,
             )
-            source = "auto-funnet"
+            source = "auto-funnet (poisson-vegger)"
         placement_result = placement.find_placements(
             fs, camera_xz, (length, width), args.place,
             wall_angle_deg=footprint.angle_deg, margin=args.margin, existing_bins=existing_bins,
