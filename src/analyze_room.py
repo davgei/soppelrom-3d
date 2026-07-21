@@ -97,9 +97,10 @@ def main() -> None:
             wall_points = np.asarray(aligned.points)
         wall_mask = placement.build_wall_mask(fs, wall_points, geometry.floor_height_m, existing_bins)
 
-        clicked = set_entrance.load_entrances(Path(args.scan).stem)
+        clicked = set_entrance.load_entrances(Path(args.scan).stem)  # original frame (like boxes)
         if clicked:
-            entrances, source = clicked, "klikket av deg"
+            clicked3d = np.array([[x, 0.0, z] for x, z in clicked]) @ rotation.T
+            entrances, source = [(float(p[0]), float(p[2])) for p in clicked3d], "klikket av deg"
         else:
             entrances = placement.detect_entrances(fs, footprint, wall_mask, camera_xz)
             source = "auto-funnet (poisson-vegger)"

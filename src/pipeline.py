@@ -108,8 +108,12 @@ def analyze_and_render(stem: str, bin_type: str) -> dict:
     wall_mask = placement.build_wall_mask(fs, wall_points, geometry.floor_height_m, existing)
     camera_world = np.array([archive.keyframe(ts).pose_cam_to_world[:3, 3] for ts in archive.timestamps])
     camera_xz = (camera_world @ rotation.T)[:, [0, 2]]
-    clicked = set_entrance.load_entrances(stem)
-    entrances = clicked or placement.detect_entrances(fs, footprint, wall_mask, camera_xz)
+    clicked = set_entrance.load_entrances(stem)  # stored in the original frame (like the boxes)
+    if clicked:
+        clicked3d = np.array([[x, 0.0, z] for x, z in clicked]) @ rotation.T
+        entrances = [(float(p[0]), float(p[2])) for p in clicked3d]
+    else:
+        entrances = placement.detect_entrances(fs, footprint, wall_mask, camera_xz)
     length, _, width = BIN_TYPES[bin_type]
     result = placement.find_placements(
         fs, camera_xz, (length, width), bin_type, wall_mask=wall_mask,

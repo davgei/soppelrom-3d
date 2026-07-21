@@ -4,6 +4,20 @@ Analyse av 3D-skanninger (Polycam) av søppelrom: romtype (dedikert søppelrom?)
 inne/ute, antall og størrelse på søppelkasser, romdimensjoner, og ledig plass til
 en ny kasse. Resultatene vises som en roterbar 3D-scene i Rerun.
 
+## Sett opp på ny PC
+
+```
+git clone https://github.com/davgei/soppelrom-3d.git
+cd soppelrom-3d
+py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Repoet inneholder **kode + annoteringer + innganger + den trente modellen** (`models/bins_latest.pt`).
+Rå-skannene (`data/raw/`, ~2,3 GB) er for store for GitHub — hent dem på den nye PC-en med
+`python -m src.download_polycam --auto`, eller kopier `data/raw/`-mappa via minnepinne/OneDrive.
+`outputs/cache/` og `outputs/previews/` regenereres automatisk (menyens «Generer alle»).
+
 ## Miljø
 
 Prosjektet har sitt **eget** virtuelt miljø på **Python 3.12** (Open3D støtter ikke 3.14).

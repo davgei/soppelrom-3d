@@ -17,6 +17,7 @@ A background worker process keeps up to 5 scans prepared ahead while you annotat
 from __future__ import annotations
 
 import copy
+import json
 import math
 import subprocess
 import sys
@@ -38,6 +39,7 @@ from .annotations import (
     save_annotations,
 )
 from .prepare_scan import ANNOTATION_DIR, CACHE_ROOT, PROJECT_ROOT, RAW_DIR, is_prepared
+from .set_entrance import ENTRANCE_DIR, load_entrances
 
 STATUS_COLORS = {
     STATUS_PROPOSED: (1.0, 0.55, 0.05),
@@ -55,6 +57,21 @@ HANDLE_NAMES = [f"handle_corner_{i}" for i in range(4)] + ["handle_top", "handle
 
 MODE_NORMAL = "normal"
 MODE_DRAW = "draw"
+MODE_ENTRANCE = "entrance"
+
+
+def _estimate_floor(mesh: o3d.geometry.TriangleMesh) -> float:
+    """Fallback floor height from mesh vertices (mode of the lower Y band) when the cached
+    floor_height is missing."""
+    ys = np.asarray(mesh.vertices)[:, 1]
+    if not len(ys):
+        return 0.0
+    lo, hi = np.percentile(ys, [1, 60])
+    band = ys[(ys >= lo) & (ys <= hi)]
+    if not len(band):
+        return float(np.percentile(ys, 5))
+    hist, edges = np.histogram(band, bins=40)
+    return float(edges[int(hist.argmax())])
 
 
 def start_background_worker(max_ready: int = 999) -> subprocess.Popen | None:
@@ -109,6 +126,8 @@ class AnnotationApp:
         self.boxes: list[BinBox] = []
         self.selected: int | None = None
         self.floor_height: float | None = None
+        self.entrances: list[tuple[float, float]] = []
+        self._drawn_entrances = 0
         self.mesh_loaded = False
         self.dirty = False
         self._last_poll = 0.0
@@ -194,6 +213,15 @@ class AnnotationApp:
         new_row.add_child(retype_btn)
         self.panel.add_child(new_row)
 
+        entrance_row = gui.Horiz(0.4 * em)
+        entrance_btn = gui.Button("Inngang av/på")
+        entrance_btn.set_on_clicked(self._toggle_entrance_mode)
+        entrance_clear = gui.Button("Nullstill innganger")
+        entrance_clear.set_on_clicked(self._clear_entrances)
+        entrance_row.add_child(entrance_btn)
+        entrance_row.add_child(entrance_clear)
+        self.panel.add_child(entrance_row)
+
         self.mode_label = gui.Label("")
         self.panel.add_child(self.mode_label)
 
@@ -268,10 +296,12 @@ class AnnotationApp:
     def _load_scan(self) -> None:
         self.scene.scene.clear_geometry()
         self.boxes = []
+        self.entrances = []
         self.selected = None
         self.mesh_loaded = False
         self.dirty = False
         self._drawn_boxes = 0
+        self._drawn_entrances = 0
         self.undo_stack.clear()
         self._cancel_draw()
         self.drag = None
@@ -304,6 +334,9 @@ class AnnotationApp:
         else:
             self.floor_height, self.boxes = load_annotations(self._cache_dir() / "proposals.json")
             source = "auto-forslag"
+        if self.floor_height is None:  # missing in cache -> estimate from the mesh so boxes sit on the floor
+            self.floor_height = _estimate_floor(mesh)
+        self.entrances = load_entrances(self._current_zip().stem)
         self.status_label.text = f"{len(self.boxes)} bokser ({source})"
 
         bounds = mesh.get_axis_aligned_bounding_box()
@@ -314,6 +347,7 @@ class AnnotationApp:
         self._cor = center.copy()
         self.scene.look_at(center, eye, [0.0, 1.0, 0.0])
         self._redraw_boxes()
+        self._redraw_entrances()
         self._update_culling(force=True)
 
     def _switch_scan(self, step: int) -> None:
@@ -1055,13 +1089,67 @@ class AnnotationApp:
                 self.pan = None
                 return gui.Widget.EventCallbackResult.CONSUMED
 
+        if self.mode == MODE_ENTRANCE:
+            return self._mouse_entrance(event)
         if self.mode == MODE_DRAW:
             return self._mouse_draw(event)
         return self._mouse_normal(event)
 
+    # ---------- entrances (doors) ----------
+
+    def _toggle_entrance_mode(self) -> None:
+        if self.mode == MODE_ENTRANCE:
+            self.mode = MODE_NORMAL
+            self.mode_label.text = ""
+        else:
+            self._cancel_draw()
+            self.mode = MODE_ENTRANCE
+            self.mode_label.text = "Inngang-modus: klikk = ny dør, Ctrl+klikk = slett nærmeste"
+
+    def _clear_entrances(self) -> None:
+        self.entrances = []
+        self.dirty = True
+        self._redraw_entrances()
+
+    def _redraw_entrances(self) -> None:
+        for i in range(self._drawn_entrances):
+            self._remove_geometry(f"entrance_{i}")
+        self._drawn_entrances = len(self.entrances)
+        for i, (x, z) in enumerate(self.entrances):
+            sphere = o3d.geometry.TriangleMesh.create_sphere(0.13, resolution=12)
+            sphere.translate([x, self._floor_y() + 0.13, z])
+            sphere.paint_uniform_color([1.0, 0.1, 1.0])
+            material = rendering.MaterialRecord()
+            material.shader = "defaultUnlit"
+            self.scene.scene.add_geometry(f"entrance_{i}", sphere, material)
+
+    def _mouse_entrance(self, event: gui.MouseEvent) -> gui.Widget.EventCallbackResult:
+        if event.type != gui.MouseEvent.Type.BUTTON_DOWN:
+            return gui.Widget.EventCallbackResult.IGNORED
+        ray = self._mouse_ray(event)
+        if ray is None:
+            return gui.Widget.EventCallbackResult.IGNORED
+        floor_point = self._ray_floor(ray)
+        if floor_point is None:
+            return gui.Widget.EventCallbackResult.CONSUMED
+        if event.is_modifier_down(gui.KeyModifier.CTRL) and self.entrances:
+            pts = np.array(self.entrances)
+            nearest = int(np.argmin(np.hypot(pts[:, 0] - floor_point[0], pts[:, 1] - floor_point[2])))
+            del self.entrances[nearest]
+        else:
+            self.entrances.append((float(floor_point[0]), float(floor_point[2])))
+        self.dirty = True
+        self._redraw_entrances()
+        return gui.Widget.EventCallbackResult.CONSUMED
+
     # ---------- persistence ----------
 
     def _save(self) -> None:
+        ENTRANCE_DIR.mkdir(parents=True, exist_ok=True)
+        (ENTRANCE_DIR / f"{self._current_zip().stem}.json").write_text(
+            json.dumps({"entrances_xz": [[x, z] for x, z in self.entrances]}, indent=2),
+            encoding="utf-8",
+        )
         if not self.boxes and not self.dirty and not self._annotation_path().exists():
             return
         save_annotations(
@@ -1069,7 +1157,9 @@ class AnnotationApp:
         )
         self.dirty = False
         approved = sum(1 for b in self.boxes if b.status == STATUS_APPROVED)
-        self.status_label.text = f"Lagret: {len(self.boxes)} bokser, {approved} godkjent"
+        self.status_label.text = (
+            f"Lagret: {len(self.boxes)} bokser, {approved} godkjent, {len(self.entrances)} inngang"
+        )
 
     def _on_close(self) -> bool:
         self._save()

@@ -20,6 +20,7 @@ from PIL import Image, ImageTk
 
 from . import pipeline
 from .annotations import BIN_TYPES
+from .set_entrance import ENTRANCE_DIR
 
 VIEWS = [
     ("Rom + mål", "room_topdown.png"),
@@ -52,6 +53,7 @@ class Dashboard:
         self._build_style()
         self._build_layout()
         self._populate()
+        self._signature = self._file_signature()
         self.root.bind("<Left>", lambda _e: self._step(-1))
         self.root.bind("<Right>", lambda _e: self._step(1))
 
@@ -135,16 +137,21 @@ class Dashboard:
 
         # bottom: actions
         actions = ttk.Frame(self.root)
-        actions.pack(fill="x", padx=14, pady=(0, 6))
+        actions.pack(fill="x", padx=14, pady=(2, 6))
+
+        def separator() -> None:
+            ttk.Separator(actions, orient="vertical").pack(side="left", fill="y", padx=10, pady=2)
+
         ttk.Button(actions, text="◀ Forrige", command=lambda: self._step(-1)).pack(side="left")
-        ttk.Button(actions, text="Neste ▶", command=lambda: self._step(1)).pack(side="left", padx=(6, 16))
+        ttk.Button(actions, text="Neste ▶", command=lambda: self._step(1)).pack(side="left", padx=6)
+        separator()
         ttk.Button(actions, text="Generer bilder", style="Accent.TButton",
                    command=lambda: self._generate([self._selected()])).pack(side="left", padx=4)
         ttk.Button(actions, text="Generer alle", command=self._generate_all).pack(side="left", padx=4)
-        ttk.Button(actions, text="Åpne i 3D", command=self._open_3d).pack(side="left", padx=(16, 4))
-        ttk.Button(actions, text="Annotér", command=self._annotate).pack(side="left", padx=4)
-        ttk.Button(actions, text="Sett inngang", command=self._set_entrance).pack(side="left", padx=4)
-        ttk.Button(actions, text="Forbered", command=self._prepare).pack(side="left", padx=4)
+        separator()
+        ttk.Button(actions, text="Åpne i 3D", command=self._open_3d).pack(side="left", padx=4)
+        ttk.Button(actions, text="Annotér (kasser + dører)", command=self._annotate).pack(side="left", padx=4)
+        ttk.Button(actions, text="Forbered rå skann", command=self._prepare).pack(side="left", padx=4)
 
         statusbar = ttk.Frame(self.root, style="Panel.TFrame")
         statusbar.pack(fill="x", side="bottom")
@@ -303,16 +310,39 @@ class Dashboard:
             self._launch("src.annotate3d", "--scan", stem)
             self._set_status("Åpner annoteringsverktøyet …")
 
-    def _set_entrance(self) -> None:
-        paths = self._scan_paths()
-        if paths:
-            self._launch("src.set_entrance", "--scan", paths[0], "--ply", paths[1])
-            self._set_status("Åpner inngangs-velger (shift+klikk dørene) …")
-
     def _prepare(self) -> None:
         self._generate([self._selected()])
 
+    # ---------- live refresh: watch annotation/entrance files ----------
+
+    def _file_signature(self) -> dict[str, tuple[float, float]]:
+        signature = {}
+        for stem in pipeline.list_scans():
+            annotation = pipeline.ANNOTATION_DIR / f"{stem}.json"
+            entrance = ENTRANCE_DIR / f"{stem}.json"
+            signature[stem] = (
+                annotation.stat().st_mtime if annotation.exists() else 0.0,
+                entrance.stat().st_mtime if entrance.exists() else 0.0,
+            )
+        return signature
+
+    def _poll(self) -> None:
+        try:
+            signature = self._file_signature()
+            changed = [stem for stem, value in signature.items() if self._signature.get(stem) != value]
+            if changed:
+                self._signature = signature
+                self._populate_keep_selection()
+                selected = self._selected()
+                if selected in changed and not self._busy:
+                    self._set_status(f"Annotering endret — oppdaterer {selected} …")
+                    self._generate([selected])
+        except Exception:
+            pass
+        self.root.after(1500, self._poll)
+
     def run(self) -> None:
+        self.root.after(1500, self._poll)
         self.root.mainloop()
 
 

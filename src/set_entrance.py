@@ -14,7 +14,6 @@ from pathlib import Path
 import numpy as np
 import open3d as o3d
 
-from . import backbone
 from .loader import load_point_cloud
 from .reconstruct import ReconstructionConfig
 
@@ -43,12 +42,11 @@ def main() -> None:
     pcd, archive, _ = load_point_cloud(
         args.scan, args.ply, ReconstructionConfig(min_confidence=255, max_depth_m=5.0)
     )
-    _, aligned = backbone.analyze(pcd)
 
     print("SHIFT+KLIKK paa hver inngang/dor i vinduet (flere er ok), lukk vinduet naar du er ferdig.")
     vis = o3d.visualization.VisualizerWithEditing()
     vis.create_window(window_name="Shift+klikk paa inngangene")
-    vis.add_geometry(aligned)
+    vis.add_geometry(pcd)  # original frame, same as the annotation tool + saved boxes
     vis.run()
     vis.destroy_window()
 
@@ -58,7 +56,7 @@ def main() -> None:
         archive.close()
         return
 
-    points_xyz = np.asarray(aligned.points)[picked]
+    points_xyz = np.asarray(pcd.points)[picked]
     entrances = [[float(p[0]), float(p[2])] for p in points_xyz]
     ENTRANCE_DIR.mkdir(parents=True, exist_ok=True)
     out = ENTRANCE_DIR / f"{Path(args.scan).stem}.json"

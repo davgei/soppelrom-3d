@@ -1,0 +1,13 @@
+# Python 3.12 kreves (Open3D 0.19 har ikke wheel for 3.13/3.14).
+# Oppsett paa ny PC:
+#   py -3.12 -m venv .venv
+#   .venv\Scripts\python.exe -m pip install -r requirements.txt
+numpy>=2
+opencv-python
+open3d==0.19.0
+scipy
+pillow
+pyyaml
+rerun-sdk
+ultralytics
+playwright

@@ -2,14 +2,16 @@
 __pycache__/
 *.pyc
 
-# data and outputs stay out of git (large binaries)
+# data and generated outputs stay out of git (large binaries) ...
 data/
-outputs/
+outputs/*
 *.ply
 *.zip
 *.pt
 *.pth
 *.onnx
 
-# exception: the published fine-tuned weights are shared via the repo
+# ... EXCEPT the human work + the shared model, which travel with the repo
+!outputs/annotations/
+!outputs/entrances/
 !models/bins_latest.pt
