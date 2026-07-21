@@ -54,6 +54,7 @@ def find_placements(
     wall_angle_deg: float = 0.0,
     margin: float = 0.20,
     existing_bins: list[tuple[float, float, float, float, float]] | None = None,
+    entrance_override: tuple[float, float] | None = None,
     entrance_clear_radius: float = 1.0,
     pull_out_lane: float = 1.0,
     spacing: float = 0.15,
@@ -90,10 +91,13 @@ def find_placements(
     free_acc = free & accessible
 
     entrance_xz: tuple[float, float] | None = None
-    if len(camera_xz):
-        entrance = camera_xz[: min(10, len(camera_xz))].mean(axis=0)
-        entrance_xz = (float(entrance[0]), float(entrance[1]))
-        free_acc = free_acc & (np.hypot(wx - entrance[0], wz - entrance[1]) >= entrance_clear_radius)
+    if entrance_override is not None:
+        entrance_xz = (float(entrance_override[0]), float(entrance_override[1]))
+    elif len(camera_xz):
+        start = camera_xz[: min(10, len(camera_xz))].mean(axis=0)
+        entrance_xz = (float(start[0]), float(start[1]))
+    if entrance_xz is not None:
+        free_acc = free_acc & (np.hypot(wx - entrance_xz[0], wz - entrance_xz[1]) >= entrance_clear_radius)
 
     # keep existing bins' footprints and their pull-out lane (toward the exit) clear
     if existing_bins:

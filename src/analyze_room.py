@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import backbone, freespace, placement, render
+from . import backbone, freespace, placement, render, set_entrance
 from .annotations import BIN_TYPES, load_annotations
 from .loader import load_point_cloud
 from .reconstruct import ReconstructionConfig
@@ -86,11 +86,14 @@ def main() -> None:
         )
         camera_xz = (camera_world @ rotation.T)[:, [0, 2]]
         existing_bins = _load_existing_bins(Path(args.scan).stem, rotation)
+        entrance_override = set_entrance.load_entrance(Path(args.scan).stem)
         placement_result = placement.find_placements(
             fs, camera_xz, (length, width), args.place,
             wall_angle_deg=footprint.angle_deg, margin=args.margin, existing_bins=existing_bins,
+            entrance_override=entrance_override,
         )
-        print(f"tar hensyn til {len(existing_bins)} eksisterende kasse(r)")
+        source = "din klikkede inngang" if entrance_override is not None else "auto (skann-start)"
+        print(f"tar hensyn til {len(existing_bins)} eksisterende kasse(r); inngang: {source}")
         print(f"\n=== Plass til ny '{args.place}' ({length:.2f} x {width:.2f} m + {args.margin:.2f} m margin) ===")
         print(f"mulige plasseringer: {len(placement_result.candidates)}")
         for index, cand in enumerate(placement_result.candidates, start=1):
