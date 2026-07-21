@@ -90,7 +90,7 @@ def main() -> None:
 
         if placement_result is not None:
             visualize.show_placements_o3d(
-                aligned, placement_result, geometry.floor_height_m, BIN_TYPES[args.place][1]
+                aligned, fs, placement_result, geometry.floor_height_m, BIN_TYPES[args.place][1]
             )
         else:
             visualize.show_freespace_o3d(aligned, fs, geometry.floor_height_m)

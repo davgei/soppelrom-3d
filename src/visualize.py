@@ -148,33 +148,14 @@ def show_scene_o3d(
     )
 
 
-def show_placements_o3d(
-    aligned_pcd: o3d.geometry.PointCloud,
-    result,
-    floor_height: float,
-    bin_height: float = 1.15,
-    window_name: str = "Plass til ny kasse (gronn = kandidat)",
-) -> None:
-    """Orbit the real scene with green candidate boxes standing on the floor where a new bin fits."""
-    geometries: list = [aligned_pcd]
-    for cand in result.candidates:
-        box = bin_box_lineset(cand.rect, floor_height, floor_height + bin_height, color=(0.1, 0.9, 0.1))
-        geometries.append(box)
-    o3d.visualization.draw_geometries(geometries, window_name=window_name, mesh_show_back_face=True)
-
-
-def show_freespace_o3d(
-    aligned_pcd: o3d.geometry.PointCloud,
-    result,
-    floor_height: float,
-    window_name: str = "Ledig gulv (gronn = ledig, rod = opptatt)",
-) -> None:
-    """Tint the actual floor points green where free / red where occupied, keep the rest as-is,
-    so you can orbit the real scene and see the free-area mapping directly on the floor."""
+def _tinted_floor_cloud(
+    aligned_pcd: o3d.geometry.PointCloud, fs, floor_height: float
+) -> o3d.geometry.PointCloud:
+    """Copy of the cloud with floor points painted green (free) / red (occupied) — the 'carpet'."""
     points = np.asarray(aligned_pcd.points)
     colors = np.asarray(aligned_pcd.colors).copy()
-    cell, origin = result.cell, result.origin
-    rows, cols = result.free.shape
+    cell, origin = fs.cell, fs.origin
+    rows, cols = fs.free.shape
 
     near_floor = np.abs(points[:, 1] - floor_height) < 0.12
     col_idx = np.floor((points[:, 0] - origin[0]) / cell).astype(int)
@@ -182,11 +163,35 @@ def show_freespace_o3d(
     valid = np.where(
         near_floor & (col_idx >= 0) & (col_idx < cols) & (row_idx >= 0) & (row_idx < rows)
     )[0]
-    is_free = result.free[row_idx[valid], col_idx[valid]]
-    is_occupied = result.occupied[row_idx[valid], col_idx[valid]]
-    colors[valid[is_free]] = [0.1, 0.8, 0.1]
-    colors[valid[is_occupied]] = [0.85, 0.1, 0.1]
+    colors[valid[fs.free[row_idx[valid], col_idx[valid]]]] = [0.1, 0.8, 0.1]
+    colors[valid[fs.occupied[row_idx[valid], col_idx[valid]]]] = [0.85, 0.1, 0.1]
 
     tinted = o3d.geometry.PointCloud(aligned_pcd)
     tinted.colors = o3d.utility.Vector3dVector(colors)
-    o3d.visualization.draw_geometries([tinted], window_name=window_name)
+    return tinted
+
+
+def show_freespace_o3d(
+    aligned_pcd: o3d.geometry.PointCloud,
+    fs,
+    floor_height: float,
+    window_name: str = "Ledig gulv (gronn = ledig, rod = opptatt)",
+) -> None:
+    """Orbit the real scene with the free/occupied 'carpet' painted onto the floor."""
+    o3d.visualization.draw_geometries([_tinted_floor_cloud(aligned_pcd, fs, floor_height)], window_name=window_name)
+
+
+def show_placements_o3d(
+    aligned_pcd: o3d.geometry.PointCloud,
+    fs,
+    result,
+    floor_height: float,
+    bin_height: float = 1.15,
+    window_name: str = "Plass til ny kasse (gronn teppe = ledig, bla boks = kandidat)",
+) -> None:
+    """Free/occupied carpet on the floor PLUS candidate boxes (blue, to stand out from the carpet)."""
+    geometries: list = [_tinted_floor_cloud(aligned_pcd, fs, floor_height)]
+    for cand in result.candidates:
+        box = bin_box_lineset(cand.rect, floor_height, floor_height + bin_height, color=(0.1, 0.4, 1.0))
+        geometries.append(box)
+    o3d.visualization.draw_geometries(geometries, window_name=window_name, mesh_show_back_face=True)
