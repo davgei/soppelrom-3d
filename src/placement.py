@@ -308,101 +308,116 @@ def pack_placements(
     passage_width: float,
     wall_angle_deg: float = 0.0,
     margin: float = 0.20,
-    spacing: float = 0.15,
+    spacing: float = 0.08,
     max_bins: int = 40,
     wall_weight: float = 3.0,
-    near_weight: float = 1.0,
+    near_weight: float = 1.6,
+    size_weight: float = 0.9,
 ) -> tuple[list[Candidate], np.ndarray, np.ndarray]:
     """Fill free floor with a MIX of bin types (bin_specs = (name, length, width), largest first).
 
-    Order of priority, matching how the user reasons about it:
-      1. lay the push-path FIRST — a near-straight route from a door to every existing bin — and
-         treat it as SACRED: no new bin may sit on it (so the existing bins can always be wheeled
-         out), EXCEPT a small apron right around each existing bin, which is reclaimed as usable
-         floor so new bins can line up next to the old ones;
-      2. then fill the remaining free floor, hugging the walls/edges and clustering near the
-         existing bins. Bins never overlap; each must be reachable from a door.
+    Placed ONE bin at a time, re-routing the push-path after each, matching how the user reasons:
+      * the push-path is a near-straight route from a door to every bin and is SACRED — no new bin
+        may sit on it, so every bin can always be wheeled out;
+      * a bin's own footprint counts as PATH (you stand where the bin is to move it), so placing a
+        bin never blocks another bin's path, and the newest bin becomes a bit of path the next bin
+        can cluster onto;
+      * new bins hug the walls / room perimeter, are oriented parallel to the room, and pack tightly
+        next to the existing bins and each other. Bins never overlap.
     Returns (candidates, corridor, route)."""
     cell, origin = fs.cell, fs.origin
     shape = fs.free.shape
     free_acc = fs.free & accessible
     existing_centers = [(b[0], b[1]) for b in existing_bins]
-    occ = _boxes_mask(existing_bins, origin, cell, shape, grow=0.10)
-
-    # 1) the push-path, computed once and then frozen
-    route, corridor, region = route_corridor(fs, free_acc & ~occ, entrances, existing_centers, passage_width)
-    apron = binary_dilation(_boxes_mask(existing_bins, origin, cell, shape, grow=0.0),
-                            iterations=max(1, int(0.55 / cell)))  # reclaimable ring around each bin
-    protected = corridor & ~apron
-    placeable_region = region | binary_dilation(corridor, iterations=1)  # floor reachable from a door
 
     # wall/edge preference: a real bin stands against a WALL — the room's perimeter or a detected
     # tall wall — not marooned in the open middle and not clinging to a stray clutter island in the
-    # centre. So "wall" = the outer rim of the observed floor plus any tall wall, and `wall_dist`
-    # measures how far a spot is from it: ~0 against a wall, large out in the open.
+    # centre. `wall_dist` measures how far a spot is from a wall: ~0 against one, large out in the open.
     perimeter = fs.floor_observed & ~binary_erosion(fs.floor_observed, iterations=2)
     walls = perimeter | wall_mask if wall_mask is not None else perimeter
     wall_dist_map = distance_transform_edt(~walls) * cell if walls.any() else np.full(shape, 5.0)
+    largest_area = max(length * width for _, length, width in bin_specs)
 
     from . import place_prior  # local import: keeps placement importable without torch present
     prior = place_prior.cached_prior()
     dist_wall, clearance = (place_prior.scene_feature_maps(fs, wall_mask)
                             if prior is not None else (None, None))
-    placed_centers: list[tuple[float, float]] = []
-    placed: list[Candidate] = []
 
     def _wall_m(xz: tuple[float, float]) -> float:
         c = int(np.clip((xz[0] - origin[0]) / cell, 0, shape[1] - 1))
         r = int(np.clip((xz[1] - origin[1]) / cell, 0, shape[0] - 1))
         return float(wall_dist_map[r, c])
 
-    def _try(spot: Candidate, name: str, length: float, width: float) -> None:
-        nonlocal occ
-        cand_mask = _box_mask(spot.rect, origin, cell, shape, grow=spacing)
-        if (cand_mask & occ).any():
-            return  # overlaps an existing/placed bin
-        if (cand_mask & protected).any():
-            return  # sits on the sacred push-path
-        if not (cand_mask & placeable_region).any():
-            return  # cannot be wheeled here from a door
-        placed.append(Candidate(spot.center_xz, spot.rect, length, width, spot.clearance_m, bin_type=name))
-        occ = occ | cand_mask
-        placed_centers.append(spot.center_xz)
+    def _reroute(bins: list) -> tuple:
+        """Recompute the push-path treating every bin footprint as passable path (you route through
+        the spot where a bin stands), so no bin can block another and each bin extends the path."""
+        occ_solid = _boxes_mask(bins, origin, cell, shape, grow=0.10)   # for overlap tests
+        bin_fp = _boxes_mask(bins, origin, cell, shape, grow=0.02)      # counted as path
+        passable = (free_acc & ~occ_solid) | bin_fp
+        route, corridor, region = route_corridor(fs, passable, entrances,
+                                                  [(b[0], b[1]) for b in bins], passage_width)
+        corridor = corridor | bin_fp   # a bin's own floor is shown as part of the push-path
+        apron = binary_dilation(_boxes_mask(bins, origin, cell, shape, grow=0.0),
+                                iterations=max(1, int(0.45 / cell)))  # reclaimable ring around bins
+        protected = corridor & ~apron
+        placeable = region | binary_dilation(corridor, iterations=1)
+        return occ_solid, corridor, route, protected, placeable
 
-    def _rank(spots: list[Candidate]) -> list[Candidate]:
+    all_bins = list(existing_bins)
+    occ, corridor, route, protected, placeable = _reroute(all_bins)
+    placed: list[Candidate] = []
+
+    def _rank(spots: list[Candidate], centers: list[tuple[float, float]]) -> list[Candidate]:
         if not spots:
             return spots
         wall_bonus = np.array([np.clip(1.0 - _wall_m(c.center_xz) / 1.5, 0.0, 1.0) for c in spots])
-        if existing_centers:
-            ex = np.array(existing_centers)
+        if centers:  # pull new bins tight to the nearest existing/placed bin (clustering)
+            ex = np.array(centers)
             near = np.array([float(np.min(np.hypot(ex[:, 0] - c.center_xz[0], ex[:, 1] - c.center_xz[1])))
                              for c in spots])
-            near_bonus = np.clip(1.0 - near / 3.0, 0.0, 1.0)
+            near_bonus = np.clip(1.0 - near / 2.0, 0.0, 1.0)
         else:
             near_bonus = np.zeros(len(spots))
+        size_bonus = np.array([size_weight * (c.length_m * c.width_m) / largest_area for c in spots])
         if prior is not None:  # learned prior: how much the spot looks like where bins really stand
-            others = existing_centers + placed_centers
-            feats = [place_prior.features_at(c.center_xz, fs, dist_wall, clearance, others, entrances)
+            feats = [place_prior.features_at(c.center_xz, fs, dist_wall, clearance, centers, entrances)
                      for c in spots]
             base = np.array(prior.score(feats))
         else:
             base = np.zeros(len(spots))
-        score = base + wall_weight * wall_bonus + near_weight * near_bonus
+        score = base + wall_weight * wall_bonus + near_weight * near_bonus + size_bonus
         return [s for _, s in sorted(zip(score, spots), key=lambda pair: -float(pair[0]))]
 
-    pool = max(4 * max_bins, 30)  # a generous pool so ranking can actually choose the best spots
-    for name, length, width in bin_specs:  # largest first
-        # bins hug the edge of the free floor; open middle only if the room has no wall-adjacent room
-        spots = _wall_candidates(free_acc & ~occ, walls, length, width, origin, cell, spacing, pool)
-        if not spots:
-            spots = _open_floor_candidates(free_acc & ~occ, wall_angle_deg, length, width, margin,
-                                           origin, cell, existing_bins, spacing, pool)
-        for spot in _rank(spots):
-            if len(placed) >= max_bins:
-                break
-            _try(spot, name, length, width)
-        if len(placed) >= max_bins:
-            break
+    def _fits(spot: Candidate) -> bool:
+        cand_mask = _box_mask(spot.rect, origin, cell, shape, grow=spacing)
+        if (cand_mask & occ).any():
+            return False   # overlaps an existing/placed bin
+        if (cand_mask & protected).any():
+            return False   # sits on the sacred push-path (outside the reclaimable apron)
+        if not (cand_mask & placeable).any():
+            return False   # cannot be wheeled here from a door
+        return True
+
+    pool = max(4 * max_bins, 30)
+    while len(placed) < max_bins:
+        centers = existing_centers + [c.center_xz for c in placed]
+        spots: list[Candidate] = []
+        for name, length, width in bin_specs:
+            found = _wall_candidates(free_acc & ~occ, walls, length, width, origin, cell, spacing,
+                                     pool, wall_angle_deg=wall_angle_deg)
+            if not found:
+                found = _open_floor_candidates(free_acc & ~occ, wall_angle_deg, length, width, margin,
+                                               origin, cell, all_bins, spacing, pool)
+            for s in found:
+                s.bin_type = name
+            spots.extend(found)
+        chosen = next((s for s in _rank(spots, centers) if _fits(s)), None)
+        if chosen is None:
+            break  # nothing more fits without blocking a path or overlapping
+        placed.append(chosen)
+        (cx, cz), (rl, rw), rang = chosen.rect
+        all_bins.append((cx, cz, rl, rw, rang))
+        occ, corridor, route, protected, placeable = _reroute(all_bins)  # one bin, then a fresh path
     return placed, corridor, route
 
 
@@ -433,6 +448,17 @@ def _box_fits(allowed: np.ndarray, corners: np.ndarray, origin: np.ndarray, cell
     return outside <= tol * total
 
 
+def _snap_to_axes(inward: np.ndarray, angle_deg: float) -> np.ndarray:
+    """Snap a direction to the nearest of the room's two principal axes (from the footprint angle),
+    so every bin ends up parallel to the walls instead of pointing whichever way the local, ragged
+    edge normal happened to face — the bins then look systematically placed, not scattered."""
+    a = np.radians(angle_deg)
+    u = np.array([np.cos(a), np.sin(a)])
+    v = np.array([-np.sin(a), np.cos(a)])
+    options = [u, -u, v, -v]
+    return options[int(np.argmax([float(inward @ o) for o in options]))]
+
+
 def _wall_candidates(
     free_acc: np.ndarray,
     wall_mask: np.ndarray,
@@ -442,12 +468,14 @@ def _wall_candidates(
     cell: float,
     spacing: float,
     max_candidates: int,
-    wall_gap: float = 0.10,
+    wall_gap: float = 0.03,
+    wall_angle_deg: float | None = None,
 ) -> list[Candidate]:
     """Place bins hugging the walls / edge of the free floor. A bin parks with its back a small gap
     from the wall and its LONG side along the wall (short side into the room — how bins actually
-    stand), oriented by the local wall normal. Candidates are generated densely along every edge
-    and a little slack is allowed at ragged edges; the caller ranks and de-conflicts them."""
+    stand). Orientation is snapped to the room axis (wall_angle_deg) so neighbouring bins are
+    parallel. Candidates are generated densely along every edge and a little slack is allowed at
+    ragged edges; the caller ranks and de-conflicts them."""
     if wall_mask is None or not wall_mask.any():
         return []
     span = max(length, width)   # runs along the wall
@@ -477,6 +505,8 @@ def _wall_candidates(
         if norm < 1e-6:
             continue
         inward /= norm
+        if wall_angle_deg is not None:
+            inward = _snap_to_axes(inward, wall_angle_deg)
         wall_dir = np.array([-inward[1], inward[0]])
         ctr = np.array([origin[0] + (c0 + 0.5) * cell, origin[1] + (r0 + 0.5) * cell])
         box = _box_corners(ctr, wall_dir, inward, span, depth)

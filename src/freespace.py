@@ -34,7 +34,7 @@ def compute_free_space(
     aligned_pcd: o3d.geometry.PointCloud,
     floor_height: float,
     footprint: Footprint,
-    obstacle_min_height: float = 0.08,
+    obstacle_min_height: float = 0.12,
     obstacle_max_height: float = 2.0,
     min_obstacle_area_m2: float = 0.06,
 ) -> FreeSpaceResult:
@@ -54,6 +54,9 @@ def compute_free_space(
     # the floor as "occupied" (it drifts a few cm off the plane). Taking the lowest scanned point in
     # each cell as that cell's ground lets the free-space test follow the actual slope. A light
     # median smooth removes single-cell wells (stray low points) without spanning real obstacles.
+    # Ground = from the local low point up to obstacle_min_height (~12 cm): terrain always varies a
+    # little and that would never stop you rolling a bin there, so it must count as floor — this is
+    # also what lets a bin reach right up to a wall, where the floor otherwise reads as red.
     ground = np.full((rows, cols), np.inf)
     np.minimum.at(ground, (row_all, col_all), y)
     ground[~np.isfinite(ground)] = floor_height

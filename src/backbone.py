@@ -104,15 +104,19 @@ def _footprint(floor_xz: np.ndarray, cell: float = 0.05, min_count: int = 3) -> 
     np.add.at(counts, (cells[:, 1], cells[:, 0]), 1)
     occupied = (counts >= min_count).astype(np.uint8)
 
-    # Close first to bridge gaps where the floor is occluded (objects standing on it), so the room
-    # stays ONE region; then open to drop thin stray streaks. Without the close the largest
-    # connected component can collapse to a narrow strip and the footprint comes out far too thin.
-    occupied = cv2.morphologyEx(occupied, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))  # ~0.35 m
+    # Close first to bridge gaps where the floor is occluded (objects standing on it) or where the
+    # scan has holes, so the room stays connected; then open to drop thin stray streaks. A wide
+    # kernel matters: a drain line, shadow or unscanned strip can otherwise split the floor in two.
+    occupied = cv2.morphologyEx(occupied, cv2.MORPH_CLOSE, np.ones((13, 13), np.uint8))  # ~0.65 m
     occupied = cv2.morphologyEx(occupied, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    # Keep every sizeable floor region, not only the single largest — a floor split into a couple of
+    # big pieces (by a gap the close didn't bridge) would otherwise lose half of itself. The bounding
+    # rectangle then spans all of them, so the room extent covers the whole floor.
     n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(occupied, connectivity=8)
     if n_labels > 1:
-        largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-        occupied = (labels == largest).astype(np.uint8)
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        keep = 1 + np.flatnonzero(areas >= 0.2 * areas.max())
+        occupied = np.isin(labels, keep).astype(np.uint8)
     occupied = binary_fill_holes(occupied).astype(np.uint8)  # count floor hidden under objects too
 
     rows, cols = np.where(occupied > 0)
@@ -149,7 +153,7 @@ def analyze(
     min_plane_frac: float = 0.03,
     min_ceiling_height_m: float = 1.2,
     indoor_coverage_threshold: float = 0.5,
-    floor_band_m: float = 0.12,
+    floor_band_m: float = 0.25,
     seed: int = 42,
 ) -> tuple[RoomGeometry, o3d.geometry.PointCloud]:
     o3d.utility.random.seed(seed)  # RANSAC is randomized; seed it so results are reproducible
