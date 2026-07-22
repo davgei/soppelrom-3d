@@ -330,11 +330,12 @@ def pack_placements(
     free_acc = fs.free & accessible
     existing_centers = [(b[0], b[1]) for b in existing_bins]
 
-    # wall/edge preference: a real bin stands against a WALL — the room's perimeter or a detected
-    # tall wall — not marooned in the open middle and not clinging to a stray clutter island in the
-    # centre. `wall_dist` measures how far a spot is from a wall: ~0 against one, large out in the open.
-    perimeter = fs.floor_observed & ~binary_erosion(fs.floor_observed, iterations=2)
-    walls = perimeter | wall_mask if wall_mask is not None else perimeter
+    # wall preference: a real bin stands against a real WALL (detected tall structure), NOT against
+    # the ragged edge of the scan/map — that boundary is usually just where scanning stopped, not a
+    # wall, so we must not hug it. `wall_dist` = distance to the nearest real wall (~0 against one,
+    # large in the open). With no wall detected there is nothing to hug -> bins cluster near existing.
+    walls = (binary_dilation(wall_mask, iterations=1)
+             if wall_mask is not None and wall_mask.any() else np.zeros(shape, dtype=bool))
     wall_dist_map = distance_transform_edt(~walls) * cell if walls.any() else np.full(shape, 5.0)
     largest_area = max(length * width for _, length, width in bin_specs)
 
@@ -471,15 +472,15 @@ def _wall_candidates(
     wall_gap: float = 0.03,
     wall_angle_deg: float | None = None,
 ) -> list[Candidate]:
-    """Place bins hugging the walls / edge of the free floor. A bin parks with its back a small gap
-    from the wall and its LONG side along the wall (short side into the room — how bins actually
-    stand). Orientation is snapped to the room axis (wall_angle_deg) so neighbouring bins are
-    parallel. Candidates are generated densely along every edge and a little slack is allowed at
+    """Place bins hugging the walls. A bin parks with its SHORT side against the wall and its long
+    side extending into the room (so a row of bins packs tightly along the wall), a small gap off
+    the wall. Orientation is snapped to the room axis (wall_angle_deg) so neighbouring bins are
+    parallel. Candidates are generated densely along the wall and a little slack is allowed at
     ragged edges; the caller ranks and de-conflicts them."""
     if wall_mask is None or not wall_mask.any():
         return []
-    span = max(length, width)   # runs along the wall
-    depth = min(length, width)  # sticks into the room
+    along = min(length, width)  # SHORT side sits against the wall (bins line up side by side)
+    into = max(length, width)   # LONG side extends into the room
     distance, (row_idx, col_idx) = distance_transform_edt(~wall_mask, return_indices=True)
     distance_m = distance * cell
     rows, cols = free_acc.shape
@@ -487,7 +488,7 @@ def _wall_candidates(
     dir_col = xx - col_idx  # world X points along columns
     dir_row = yy - row_idx  # world Z points along rows
 
-    target = depth / 2 + wall_gap
+    target = into / 2 + wall_gap
     band = free_acc & (distance_m >= target - cell) & (distance_m <= target + cell * 8)
     ys, xs = np.where(band)
     if not len(xs):
@@ -509,7 +510,7 @@ def _wall_candidates(
             inward = _snap_to_axes(inward, wall_angle_deg)
         wall_dir = np.array([-inward[1], inward[0]])
         ctr = np.array([origin[0] + (c0 + 0.5) * cell, origin[1] + (r0 + 0.5) * cell])
-        box = _box_corners(ctr, wall_dir, inward, span, depth)
+        box = _box_corners(ctr, wall_dir, inward, along, into)
         if _box_fits(free_acc & ~taken, box, origin, cell, tol=0.12):
             rect = cv2.minAreaRect(box.astype(np.float32))
             candidates.append(Candidate((float(ctr[0]), float(ctr[1])), rect, float(length), float(width), float(distance_m[r0, c0])))
