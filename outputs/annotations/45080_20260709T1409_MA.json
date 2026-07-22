@@ -1,0 +1,78 @@
+{
+  "scan": "45080_20260709T1409_MA.zip",
+  "floor_height": -1.323697920498991,
+  "boxes": [
+    {
+      "center": [
+        2.499803066253662,
+        -0.6986979204989909,
+        -4.011540412902832
+      ],
+      "extent": [
+        1.37,
+        1.25,
+        0.78
+      ],
+      "yaw_deg": -128.91826414251258,
+      "bin_type": "4-hjuls container",
+      "status": "godkjent",
+      "source": "auto",
+      "n_views": 109,
+      "confidence": 0.68
+    },
+    {
+      "center": [
+        0.25262214899694013,
+        -0.748697920498991,
+        -6.536619638060715
+      ],
+      "extent": [
+        0.6,
+        1.15,
+        0.75
+      ],
+      "yaw_deg": 52.976419143975946,
+      "bin_type": "2-hjuls dunk",
+      "status": "godkjent",
+      "source": "manuell",
+      "n_views": 0,
+      "confidence": 0.0
+    },
+    {
+      "center": [
+        0.48172582432731303,
+        -0.748697920498991,
+        -5.966154332900155
+      ],
+      "extent": [
+        0.6,
+        1.15,
+        0.75
+      ],
+      "yaw_deg": 71.12289526573014,
+      "bin_type": "2-hjuls dunk",
+      "status": "godkjent",
+      "source": "manuell",
+      "n_views": 0,
+      "confidence": 0.0
+    },
+    {
+      "center": [
+        1.0682893102512292,
+        -0.748697920498991,
+        -5.592455890282012
+      ],
+      "extent": [
+        0.6,
+        1.15,
+        0.75
+      ],
+      "yaw_deg": 52.976419143975946,
+      "bin_type": "2-hjuls dunk",
+      "status": "godkjent",
+      "source": "manuell",
+      "n_views": 0,
+      "confidence": 0.0
+    }
+  ]
+}

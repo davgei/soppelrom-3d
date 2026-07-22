@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import open3d as o3d
 
-from . import backbone, freespace, placement, render, set_entrance
+from . import backbone, doors, freespace, placement, render, set_entrance
 from .annotations import BIN_TYPES, load_annotations
 from .loader import load_point_cloud
 from .reconstruct import ReconstructionConfig
@@ -113,7 +113,7 @@ def analyze_and_render(stem: str, bin_type: str) -> dict:
         clicked3d = np.array([[x, 0.0, z] for x, z in clicked]) @ rotation.T
         entrances = [(float(p[0]), float(p[2])) for p in clicked3d]
     else:
-        entrances = placement.detect_entrances(fs, footprint, wall_mask, camera_xz)
+        entrances = doors.find_doors(fs, footprint, wall_mask, camera_xz)
     length, _, width = BIN_TYPES[bin_type]
     result = placement.find_placements(
         fs, camera_xz, (length, width), bin_type, wall_mask=wall_mask,

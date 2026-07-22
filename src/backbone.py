@@ -153,10 +153,12 @@ def analyze(
     if not planes:
         raise ValueError("no horizontal floor plane found")
 
-    # Floor = the horizontal plane with the most inliers. The main floor dominates, so this is
-    # robust; picking the *lowest* plane can latch onto a small low surface (e.g. a step).
-    floor_index = max(range(len(planes)), key=lambda i: len(planes[i][2]))
-    _, floor_normal, floor_points = planes[floor_index]
+    # Floor = the LOWEST horizontal plane. The ceiling is always above the floor, so choosing by
+    # size is what mislabels an enclosed/cluttered room's ceiling as the floor: there the ceiling
+    # is the biggest plane, and if the floor is occluded a size filter drops it, leaving only the
+    # ceiling. Every candidate already passed the min-fraction + horizontal tests, and nothing sits
+    # below the real floor, so the lowest one is the floor. planes[i][0] = mean height (~Y-up).
+    _, floor_normal, floor_points = min(planes, key=lambda plane: plane[0])
 
     aligned, rotation = _gravity_align(pcd, floor_normal)
     aligned_points = np.asarray(aligned.points)

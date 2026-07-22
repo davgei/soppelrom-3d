@@ -93,6 +93,61 @@ class BinBox:
         )
 
 
+# Types whose real-world size is fixed and known — every bin of the type is identical, so a
+# proposal can be snapped to the exact dimensions instead of the noisy measured footprint.
+# "annet" is the unknown/other catch-all, so it is left at its measured size.
+FIXED_SIZE_TYPES = tuple(name for name in BIN_TYPES if name != "annet")
+
+
+def snap_box_to_type(box: "BinBox", floor_height: float | None) -> None:
+    """Resize a box to its bin type's exact dimensions, keeping the footprint centre and yaw and
+    re-seating the base on the floor. The canonical length goes on whichever footprint side was
+    already longer, so the orientation is preserved. No-op for 'annet' (size unknown)."""
+    if box.bin_type not in FIXED_SIZE_TYPES:
+        return
+    length, height, width = BIN_TYPES[box.bin_type]
+    base = floor_height if floor_height is not None else (box.center[1] - box.extent[1] / 2)
+    ex, _, ez = box.extent
+    box.extent = [length, height, width] if ex >= ez else [width, height, length]
+    box.center[1] = base + height / 2
+
+
+MAX_OVERLAP = 0.15  # two kept boxes may overlap at most this fraction of the smaller footprint
+
+
+def _footprint_corners_xz(box: "BinBox") -> np.ndarray:
+    ux, _, uz = box.local_axes()
+    center = np.asarray(box.center)
+    ex, _, ez = box.extent
+    corners = [center + a * ux * ex / 2 + d * uz * ez / 2 for a in (-1, 1) for d in (-1, 1)]
+    return np.array([[c[0], c[2]] for c in corners], dtype=np.float32)
+
+
+def footprint_overlap_ratio(a: "BinBox", b: "BinBox") -> float:
+    """Overlap of two oriented floor footprints as a fraction of the SMALLER one (so a small bin
+    fully inside a big one scores ~1.0, which pure IoU would understate)."""
+    _, region = cv2.rotatedRectangleIntersection(
+        cv2.minAreaRect(_footprint_corners_xz(a)), cv2.minAreaRect(_footprint_corners_xz(b))
+    )
+    if region is None:
+        return 0.0
+    inter = float(cv2.contourArea(region))
+    area_a = a.extent[0] * a.extent[2]
+    area_b = b.extent[0] * b.extent[2]
+    return inter / max(min(area_a, area_b), 1e-6)
+
+
+def remove_overlapping_boxes(boxes: list["BinBox"], max_overlap: float = MAX_OVERLAP) -> list["BinBox"]:
+    """Greedy non-max suppression on floor footprints: keep boxes by descending confidence, drop
+    any that overlap an already-kept box by more than `max_overlap`. Stops a 2-wheel bin from
+    sitting inside a 4-wheel one (which can never really happen)."""
+    kept: list[BinBox] = []
+    for box in sorted(boxes, key=lambda b: -b.confidence):
+        if all(footprint_overlap_ratio(box, other) <= max_overlap for other in kept):
+            kept.append(box)
+    return kept
+
+
 def guess_bin_type(extent: list[float]) -> str:
     length = max(extent[0], extent[2])
     width = min(extent[0], extent[2])

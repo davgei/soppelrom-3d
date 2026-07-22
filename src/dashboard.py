@@ -56,6 +56,14 @@ class Dashboard:
         self._signature = self._file_signature()
         self.root.bind("<Left>", lambda _e: self._step(-1))
         self.root.bind("<Right>", lambda _e: self._step(1))
+        # keyboard shortcuts for the most-used actions (letters shown in the button labels)
+        self.root.bind("<g>", lambda _e: self._generate([self._selected()]))  # Generer bilder
+        self.root.bind("<G>", lambda _e: self._generate_all())                # Shift+G = Generer alle
+        self.root.bind("<o>", lambda _e: self._open_3d())                     # Åpne i 3D
+        self.root.bind("<a>", lambda _e: self._annotate())                    # Annotér
+        self.root.bind("<f>", lambda _e: self._prepare())                     # Forbered
+        # refresh scan statuses the moment the dashboard regains focus (e.g. back from annotating)
+        self.root.bind("<FocusIn>", lambda _e: self._refresh_if_changed())
 
     # ---------- styling ----------
 
@@ -80,7 +88,24 @@ class Dashboard:
         style.configure("Treeview.Heading", font=("Segoe UI Semibold", 10))
         style.map("Treeview", background=[("selected", ACCENT)], foreground=[("selected", "#ffffff")])
         style.configure("TRadiobutton", background=BG, foreground=TEXT, font=("Segoe UI", 10))
-        style.configure("TCombobox", fieldbackground=PANEL, background=PANEL)
+        style.configure("TCombobox", fieldbackground=PANEL, background=PANEL,
+                        foreground=TEXT, arrowcolor=TEXT)
+        # A readonly Combobox ignores the plain configure above; without an explicit state map
+        # clam draws the field with its near-white default -> white text on a white box.
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", PANEL)],
+            background=[("readonly", PANEL)],
+            foreground=[("readonly", TEXT)],
+            selectbackground=[("readonly", PANEL)],
+            selectforeground=[("readonly", TEXT)],
+            arrowcolor=[("readonly", TEXT)],
+        )
+        # The drop-down list is a classic Tk Listbox (not ttk), styled via the option database.
+        self.root.option_add("*TCombobox*Listbox.background", PANEL)
+        self.root.option_add("*TCombobox*Listbox.foreground", TEXT)
+        self.root.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
 
     # ---------- layout ----------
 
@@ -142,16 +167,16 @@ class Dashboard:
         def separator() -> None:
             ttk.Separator(actions, orient="vertical").pack(side="left", fill="y", padx=10, pady=2)
 
-        ttk.Button(actions, text="◀ Forrige", command=lambda: self._step(-1)).pack(side="left")
-        ttk.Button(actions, text="Neste ▶", command=lambda: self._step(1)).pack(side="left", padx=6)
+        ttk.Button(actions, text="◀ Forrige (←)", command=lambda: self._step(-1)).pack(side="left")
+        ttk.Button(actions, text="Neste (→) ▶", command=lambda: self._step(1)).pack(side="left", padx=6)
         separator()
-        ttk.Button(actions, text="Generer bilder", style="Accent.TButton",
+        ttk.Button(actions, text="Generer bilder (G)", style="Accent.TButton",
                    command=lambda: self._generate([self._selected()])).pack(side="left", padx=4)
-        ttk.Button(actions, text="Generer alle", command=self._generate_all).pack(side="left", padx=4)
+        ttk.Button(actions, text="Generer alle (⇧G)", command=self._generate_all).pack(side="left", padx=4)
         separator()
-        ttk.Button(actions, text="Åpne i 3D", command=self._open_3d).pack(side="left", padx=4)
-        ttk.Button(actions, text="Annotér (kasser + dører)", command=self._annotate).pack(side="left", padx=4)
-        ttk.Button(actions, text="Forbered rå skann", command=self._prepare).pack(side="left", padx=4)
+        ttk.Button(actions, text="Åpne i 3D (O)", command=self._open_3d).pack(side="left", padx=4)
+        ttk.Button(actions, text="Annotér (A)", command=self._annotate).pack(side="left", padx=4)
+        ttk.Button(actions, text="Forbered rå skann (F)", command=self._prepare).pack(side="left", padx=4)
 
         statusbar = ttk.Frame(self.root, style="Panel.TFrame")
         statusbar.pack(fill="x", side="bottom")
@@ -326,7 +351,7 @@ class Dashboard:
             )
         return signature
 
-    def _poll(self) -> None:
+    def _refresh_if_changed(self) -> None:
         try:
             signature = self._file_signature()
             changed = [stem for stem, value in signature.items() if self._signature.get(stem) != value]
@@ -339,6 +364,9 @@ class Dashboard:
                     self._generate([selected])
         except Exception:
             pass
+
+    def _poll(self) -> None:
+        self._refresh_if_changed()
         self.root.after(1500, self._poll)
 
     def run(self) -> None:

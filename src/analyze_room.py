@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import open3d as o3d
 
-from . import backbone, freespace, placement, render, set_entrance
+from . import backbone, doors, freespace, placement, render, set_entrance
 from .annotations import BIN_TYPES, load_annotations
 from .loader import load_point_cloud
 from .reconstruct import ReconstructionConfig
@@ -102,8 +102,8 @@ def main() -> None:
             clicked3d = np.array([[x, 0.0, z] for x, z in clicked]) @ rotation.T
             entrances, source = [(float(p[0]), float(p[2])) for p in clicked3d], "klikket av deg"
         else:
-            entrances = placement.detect_entrances(fs, footprint, wall_mask, camera_xz)
-            source = "auto-funnet (poisson-vegger)"
+            entrances = doors.find_doors(fs, footprint, wall_mask, camera_xz)
+            source = "auto (lært dør-modell / heuristikk)"
 
         placement_result = placement.find_placements(
             fs, camera_xz, (length, width), args.place, wall_mask=wall_mask,

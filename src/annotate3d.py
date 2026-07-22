@@ -11,6 +11,10 @@ CAD-style interactions:
     magenta sphere to rotate, drag on the box body to move it. Click a box to select it.
   - Plain drag on empty space orbits the camera as usual; Ctrl+click teleports the
     selected box to the clicked floor point.
+  - "Plasser boks" (P): click a floor point to drop a correctly-sized box for the chosen
+    bin type — no drawing needed, since each bin type has a fixed real-world size. Hold R and
+    move the mouse to rotate the box before dropping it.
+  - Ctrl+C / Ctrl+V copy and paste the selected box (the paste lands beside the original).
 
 A background worker process keeps up to 5 scans prepared ahead while you annotate.
 """
@@ -58,6 +62,7 @@ HANDLE_NAMES = [f"handle_corner_{i}" for i in range(4)] + ["handle_top", "handle
 MODE_NORMAL = "normal"
 MODE_DRAW = "draw"
 MODE_ENTRANCE = "entrance"
+MODE_PLACE = "place"
 
 
 def _estimate_floor(mesh: o3d.geometry.TriangleMesh) -> float:
@@ -134,7 +139,12 @@ class AnnotationApp:
         self._last_preview = 0.0
         self._drawn_boxes = 0
         self.undo_stack: list[tuple[list[BinBox], int | None]] = []
+        self.clipboard: BinBox | None = None
+        self._hover_xz: tuple[float, float] | None = None
         self._ctrl_down = False
+        self._r_down = False
+        self._place_yaw = 0.0                                  # rotation for boxes dropped in place mode
+        self._place_anchor_xz: tuple[float, float] | None = None  # frozen centre while rotating with R
         self.mode = MODE_NORMAL
         self.draw_stage = 0
         self.draw_a: np.ndarray | None = None
@@ -204,8 +214,8 @@ class AnnotationApp:
         new_row = gui.Horiz(0.4 * em)
         draw_btn = gui.Button("Tegn boks")
         draw_btn.set_on_clicked(self._start_draw)
-        quick_btn = gui.Button("Standardboks")
-        quick_btn.set_on_clicked(self._new_standard_box)
+        quick_btn = gui.Button("Plasser boks av/på")
+        quick_btn.set_on_clicked(self._toggle_place)
         retype_btn = gui.Button("Sett type")
         retype_btn.set_on_clicked(self._retype_selected)
         new_row.add_child(draw_btn)
@@ -251,6 +261,9 @@ class AnnotationApp:
 
         self.help_label = gui.Label(
             "Venstre-dra: orbit. Høyre-dra: pan.\n"
+            "Plasser boks (P): klikk på gulvet\n"
+            "  (ferdig størrelse). Hold R + flytt\n"
+            "  musa for å rotere. P/ESC avslutter.\n"
             "Tegn boks (T, starter i topdown):\n"
             "  klikk A, klikk B, trykk+dra opp, slipp.\n"
             "Klikk på boks: velg. Håndtak: gult =\n"
@@ -259,6 +272,7 @@ class AnnotationApp:
             "  Del = slett, G = godkjenn\n"
             "  Piltaster = flytt, Q/E = roter\n"
             "  PgUp/PgDn = høyde, 1-4 = type\n"
+            "  Ctrl+C/V = kopier/lim boks\n"
             "  Ctrl+Z = angre, Ctrl+S = lagre\n"
             "Ctrl+klikk: flytt valgt hit. ESC: avbryt.\n"
             "Oransje = forslag, grønn = godkjent,\nblå = valgt"
@@ -504,7 +518,10 @@ class AnnotationApp:
         self.window.post_redraw()
 
     def _top_down_view(self) -> None:
-        bounds = self.scene.scene.bounding_box
+        # frame on the fixed room mesh, not scene.bounding_box: the latter grows as boxes/handles
+        # are added, so re-entering place mode kept zooming further and further out.
+        bounds = (self._mesh.get_axis_aligned_bounding_box()
+                  if self._mesh is not None else self.scene.scene.bounding_box)
         center = np.asarray(bounds.get_center())
         extent = np.asarray(bounds.get_extent())
         height = float(max(extent[0], extent[2])) * 1.1 + 2.0
@@ -682,12 +699,17 @@ class AnnotationApp:
         if event.key in (gui.KeyName.LEFT_CONTROL, gui.KeyName.RIGHT_CONTROL):
             self._ctrl_down = event.type == gui.KeyEvent.Type.DOWN
             return gui.Widget.EventCallbackResult.IGNORED
+        if event.key == gui.KeyName.R:
+            # hold R in place mode: freeze the box where it is and rotate it by moving the mouse
+            self._r_down = event.type == gui.KeyEvent.Type.DOWN
+            self._place_anchor_xz = self._hover_xz if (self._r_down and self.mode == MODE_PLACE) else None
+            return gui.Widget.EventCallbackResult.IGNORED
         if event.type != gui.KeyEvent.Type.DOWN:
             return gui.Widget.EventCallbackResult.IGNORED
 
         if event.key == gui.KeyName.ESCAPE:
-            if self.mode == MODE_DRAW:
-                self._cancel_draw()
+            if self.mode != MODE_NORMAL:
+                self._cancel_draw()  # leaves draw/place/entrance mode and clears any preview
                 self._redraw_boxes()
             else:
                 self.selected = None
@@ -699,8 +721,17 @@ class AnnotationApp:
         if self._ctrl_down and event.key == gui.KeyName.S:
             self._save()
             return gui.Widget.EventCallbackResult.CONSUMED
+        if self._ctrl_down and event.key == gui.KeyName.C:
+            self._copy_selected()
+            return gui.Widget.EventCallbackResult.CONSUMED
+        if self._ctrl_down and event.key == gui.KeyName.V:
+            self._paste()
+            return gui.Widget.EventCallbackResult.CONSUMED
         if event.key == gui.KeyName.T and self.mode != MODE_DRAW:
             self._start_draw()
+            return gui.Widget.EventCallbackResult.CONSUMED
+        if event.key == gui.KeyName.P:
+            self._toggle_place()
             return gui.Widget.EventCallbackResult.CONSUMED
 
         type_keys = {
@@ -780,21 +811,42 @@ class AnnotationApp:
             self.dirty = True
             self._redraw_boxes()
 
-    def _new_standard_box(self) -> None:
+    def _place_box_at(self, x: float, z: float) -> None:
+        """Drop a fixed-size box on the floor — the chosen bin type's real-world dimensions,
+        so a 2-/4-wheel bin needs no drawing at all, just a click for where it stands."""
         self._push_undo()
         bin_type = self.type_combo.selected_text
         ex, ey, ez = BIN_TYPES[bin_type]
-        bounds = self.scene.scene.bounding_box
-        center = bounds.get_center()
-        floor = self._floor_y()
         box = BinBox(
-            center=[float(center[0]), floor + ey / 2, float(center[2])],
+            center=[float(x), self._floor_y() + ey / 2, float(z)],
             extent=[ex, ey, ez],
-            yaw_deg=0.0,
+            yaw_deg=self._place_yaw,
             bin_type=bin_type,
             status=STATUS_APPROVED,
             source="manuell",
         )
+        self.boxes.append(box)
+        self.selected = len(self.boxes) - 1
+        self.dirty = True
+        self._redraw_boxes()
+
+    def _copy_selected(self) -> None:
+        if self.selected is not None and self.selected < len(self.boxes):
+            self.clipboard = copy.deepcopy(self.boxes[self.selected])
+            self.status_label.text = f"Kopiert: {self.clipboard.bin_type} (Ctrl+V for å lime inn)"
+
+    def _paste(self) -> None:
+        if self.clipboard is None:
+            self.status_label.text = "Utklippstavlen er tom (Ctrl+C for å kopiere valgt boks)"
+            return
+        self._push_undo()
+        box = copy.deepcopy(self.clipboard)
+        if self._hover_xz is not None:               # drop the copy under the mouse pointer
+            box.center[0], box.center[2] = self._hover_xz
+        else:                                        # no hover yet -> beside the original
+            box.center[0] += box.extent[0] / 2 + 0.2
+        box.center[1] = self._floor_y() + box.extent[1] / 2
+        box.source = "manuell"
         self.boxes.append(box)
         self.selected = len(self.boxes) - 1
         self.dirty = True
@@ -848,6 +900,75 @@ class AnnotationApp:
             self._remove_geometry("preview")
             self._remove_geometry("preview_pt_0")
             self._remove_geometry("preview_pt_1")
+
+    # ---------- place mode (click a floor point for a fixed-size box) ----------
+
+    def _toggle_place(self) -> None:
+        """Enter/leave place mode. A toggle (not just ESC) so there is always a visible way out."""
+        if self.mode == MODE_PLACE:
+            self._cancel_draw()  # leaves place mode and clears the preview
+            self._redraw_boxes()
+        else:
+            self._start_place()
+
+    def _start_place(self) -> None:
+        if not self.mesh_loaded:
+            return
+        self._cancel_draw()
+        self.mode = MODE_PLACE
+        self._top_down_view()
+        self.mode_label.text = (
+            f"Plasser «{self.type_combo.selected_text}»: klikk på gulvet. Hold R + flytt musa "
+            "for å rotere.\nKlikk «Plasser boks av/på» igjen (eller P / ESC) for å avslutte."
+        )
+
+    def _place_preview(self, xz: tuple[float, float] | None) -> None:
+        self._remove_geometry("preview")
+        if xz is None:
+            return
+        ex, ey, ez = BIN_TYPES[self.type_combo.selected_text]
+        temp = BinBox([float(xz[0]), self._floor_y() + ey / 2, float(xz[1])], [ex, ey, ez], self._place_yaw)
+        lineset = o3d.geometry.LineSet(
+            o3d.utility.Vector3dVector(temp.corners()),
+            o3d.utility.Vector2iVector(np.array(BOX_EDGES)),
+        )
+        lineset.paint_uniform_color(PREVIEW_COLOR)
+        material = rendering.MaterialRecord()
+        material.shader = "unlitLine"
+        material.line_width = 4.0
+        self.scene.scene.add_geometry("preview", lineset, material)
+        self.window.post_redraw()
+
+    def _mouse_place(self, event: gui.MouseEvent) -> gui.Widget.EventCallbackResult:
+        if event.type == gui.MouseEvent.Type.WHEEL:
+            return gui.Widget.EventCallbackResult.IGNORED
+        ray = self._mouse_ray(event)
+        if ray is None:
+            return gui.Widget.EventCallbackResult.CONSUMED
+        floor_point = self._ray_floor(ray)
+        fp_xz = (float(floor_point[0]), float(floor_point[2])) if floor_point is not None else None
+
+        # while R is held, the box stays put and the mouse spins it (yaw = angle from centre to cursor)
+        if self._r_down:
+            if self._place_anchor_xz is None and fp_xz is not None:
+                self._place_anchor_xz = fp_xz
+            if self._place_anchor_xz is not None and fp_xz is not None:
+                dx, dz = fp_xz[0] - self._place_anchor_xz[0], fp_xz[1] - self._place_anchor_xz[1]
+                if math.hypot(dx, dz) > 1e-6:
+                    self._place_yaw = math.degrees(math.atan2(dz, dx))
+        rotating = self._r_down and self._place_anchor_xz is not None
+        target = self._place_anchor_xz if rotating else fp_xz
+
+        if event.type == gui.MouseEvent.Type.MOVE:
+            if time.time() - self._last_preview > 0.03:
+                self._last_preview = time.time()
+                self._place_preview(target)
+            return gui.Widget.EventCallbackResult.CONSUMED
+        if event.type == gui.MouseEvent.Type.BUTTON_DOWN and target is not None:
+            self._place_box_at(target[0], target[1])
+            self._place_preview(target)  # stay in place mode so several bins can be dropped in a row
+            return gui.Widget.EventCallbackResult.CONSUMED
+        return gui.Widget.EventCallbackResult.CONSUMED
 
     def _rect_from_points(self, c_xz: np.ndarray) -> tuple[np.ndarray, float, float, float] | None:
         if self.draw_a is None or self.draw_b is None:
@@ -1077,6 +1198,13 @@ class AnnotationApp:
         if not self.mesh_loaded:
             return gui.Widget.EventCallbackResult.IGNORED
 
+        # track the floor point under the cursor so Ctrl+V can paste there
+        if event.type == gui.MouseEvent.Type.MOVE:
+            ray = self._mouse_ray(event)
+            floor_point = self._ray_floor(ray) if ray is not None else None
+            if floor_point is not None:
+                self._hover_xz = (float(floor_point[0]), float(floor_point[2]))
+
         # right button = pan, in every mode
         if event.type == gui.MouseEvent.Type.BUTTON_DOWN and event.is_button_down(gui.MouseButton.RIGHT):
             self._start_pan(event)
@@ -1091,6 +1219,8 @@ class AnnotationApp:
 
         if self.mode == MODE_ENTRANCE:
             return self._mouse_entrance(event)
+        if self.mode == MODE_PLACE:
+            return self._mouse_place(event)
         if self.mode == MODE_DRAW:
             return self._mouse_draw(event)
         return self._mouse_normal(event)
@@ -1150,7 +1280,10 @@ class AnnotationApp:
             json.dumps({"entrances_xz": [[x, z] for x, z in self.entrances]}, indent=2),
             encoding="utf-8",
         )
-        if not self.boxes and not self.dirty and not self._annotation_path().exists():
+        # Only persist bin annotations the user actually made or edited. Never write untouched
+        # proposals to outputs/annotations/ — that would falsely mark the scan "annotert" and feed
+        # un-approved auto-proposals into training. (Entrances above are saved regardless.)
+        if not self.dirty and not self._annotation_path().exists():
             return
         save_annotations(
             self._annotation_path(), self._current_zip().name, self.floor_height, self.boxes

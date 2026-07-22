@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import shutil
+import stat
+import time
 from pathlib import Path
 
 import cv2
@@ -19,9 +22,42 @@ from .annotations import BIN_TYPES, STATUS_APPROVED, BinBox, load_annotations
 from .prepare_scan import ANNOTATION_DIR, PROJECT_ROOT, RAW_DIR
 from .scan_io import Keyframe, ScanArchive
 
-DATASET_DIR = PROJECT_ROOT / "data" / "yolo_dataset"
+# The YOLO dataset is thousands of transient frames — keep it OUTSIDE the OneDrive-synced project
+# so it is not uploaded and cannot be file-locked mid-run (that lock is what broke --clean).
+# Override the location with SOPPELROM_DATA_DIR; defaults to %LOCALAPPDATA% (never synced).
+_data_home = os.environ.get("SOPPELROM_DATA_DIR") or os.environ.get("LOCALAPPDATA")
+DATASET_DIR = (Path(_data_home) if _data_home else Path.home() / ".cache") / "soppelrom-3d" / "yolo_dataset"
 _FLIP = np.diag([1.0, -1.0, -1.0])
 CLASS_NAMES = list(BIN_TYPES)
+
+
+def _robust_rmtree(path: Path, attempts: int = 6) -> None:
+    """Delete a tree even when Windows/OneDrive briefly locks files: clear the read-only bit and
+    retry a few times with a short pause (sync/AV usually release the handle). Best-effort — if
+    something stays locked we warn and let the export overwrite the current files in place, rather
+    than crashing the whole training run."""
+    def _onexc(func, target, _exc):
+        try:
+            os.chmod(target, stat.S_IWRITE)
+            func(target)
+        except Exception:
+            pass
+
+    for _ in range(attempts):
+        if not path.exists():
+            return
+        try:
+            shutil.rmtree(path, onexc=_onexc)          # Python 3.12+
+        except TypeError:
+            shutil.rmtree(path, onerror=lambda f, p, e: _onexc(f, p, e))  # older Python
+        except Exception:
+            pass
+        if not path.exists():
+            return
+        time.sleep(0.7)
+    if path.exists():
+        print(f"warning: could not fully clear {path} (locked by OneDrive/another app?) — "
+              "exporting over the existing files", flush=True)
 
 
 def _zip_hash(path: Path) -> str:
@@ -124,7 +160,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.clean and DATASET_DIR.exists():
-        shutil.rmtree(DATASET_DIR)
+        _robust_rmtree(DATASET_DIR)
 
     annotated: list[tuple[Path, list[BinBox]]] = []
     seen_hashes: set[str] = set()

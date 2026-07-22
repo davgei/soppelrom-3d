@@ -11,7 +11,7 @@ outputs/*
 *.pth
 *.onnx
 
-# ... EXCEPT the human work + the shared model, which travel with the repo
+# ... EXCEPT the human work + the trained models, which travel with the repo
 !outputs/annotations/
 !outputs/entrances/
-!models/bins_latest.pt
+!models/*.pt

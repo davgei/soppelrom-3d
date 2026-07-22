@@ -40,10 +40,12 @@ REJECT_MAX_ASPECT = 4.0      # longer+thinner = sliver
 REJECT_MIN_HEIGHT = 0.50     # shorter = floor clutter / debris
 REJECT_MIN_VOLUME = 0.12     # smaller = point-cloud speck
 REJECT_MAX_LENGTH = 2.60     # longer = wall slab (a merged bin PAIR ~2.4 m is still kept for review)
-MIN_TYPE_FIT = 0.35         # below this, call it "annet"
-MOLOK_SQUARENESS = 0.8       # molok is circular -> footprint must be near-square
+MIN_TYPE_FIT = 0.35         # a candidate must fit one of the generated types at least this well
 
-SCORE_TYPES = ["2-hjuls dunk", "4-hjuls container", "molok"]
+# Only these types are auto-generated: they have a fixed, well-known size. "molok" and "annet"
+# are deliberately left out — moloks are rare, and "annet" is a catch-all whose loose default size
+# let odd/sliver boxes pass as bins. A candidate that fits neither 2- nor 4-wheel is rejected.
+SCORE_TYPES = ["2-hjuls dunk", "4-hjuls container"]
 
 
 @dataclass
@@ -98,15 +100,7 @@ def size_fit(size_lhw, prior_lhw) -> float:
 
 
 def _type_fits(size_lhw) -> dict[str, float]:
-    long_side, short_side, _ = _footprint_and_height(size_lhw)
-    squareness = short_side / max(long_side, 1e-6)
-    fits: dict[str, float] = {}
-    for name in SCORE_TYPES:
-        fit = size_fit(size_lhw, BIN_TYPES[name])
-        if name == "molok" and squareness < MOLOK_SQUARENESS:
-            fit = 0.0  # circular footprint must be near-square
-        fits[name] = fit
-    return fits
+    return {name: size_fit(size_lhw, BIN_TYPES[name]) for name in SCORE_TYPES}
 
 
 def score_candidate(
@@ -136,13 +130,15 @@ def score_candidate(
         color_out = color_term
 
     type_confident = (best_fit - second_fit) >= TYPE_MARGIN and best_fit >= MIN_TYPE_FIT
-    bin_type = best_type if best_fit >= MIN_TYPE_FIT else "annet"
+    bin_type = best_type  # only 2-/4-wheel are generated; poor fits are rejected below
 
     long_side, short_side, height = _footprint_and_height(size_lhw)
     aspect = long_side / max(short_side, 1e-6)
     volume = float(size_lhw[0] * size_lhw[1] * size_lhw[2])
 
-    if short_side < REJECT_MIN_WIDTH or aspect > REJECT_MAX_ASPECT:
+    if best_fit < MIN_TYPE_FIT:
+        keep, reason = False, f"passer verken 2- eller 4-hjuls (fit {best_fit:.2f})"
+    elif short_side < REJECT_MIN_WIDTH or aspect > REJECT_MAX_ASPECT:
         keep, reason = False, f"sliver ({long_side:.2f}x{short_side:.2f} m, forhold {aspect:.1f})"
     elif height < REJECT_MIN_HEIGHT:
         keep, reason = False, f"for lav ({height:.2f} m)"
