@@ -7,6 +7,7 @@ and a stats.json under outputs/previews/<stem>/. Deliberately does NOT import pr
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -76,89 +77,112 @@ def _address(archive) -> str | None:
         return None
 
 
-def _mesh_scene(stem: str, rotation: np.ndarray, n_points: int = 1_000_000):
-    """A dense, readable point cloud sampled from the cached Poisson mesh, gravity-aligned like the
-    scene. Used only as the VISUAL backdrop for previews (the raw cloud is too sparse to read);
-    all geometry is still computed on the real cloud. Returns None if the mesh is unusable."""
-    poisson = CACHE_ROOT / stem / "mesh_poisson.ply"
-    if not poisson.exists():
-        return None
-    mesh = o3d.io.read_triangle_mesh(str(poisson))
-    if not mesh.has_triangles() or not mesh.has_vertex_colors():
-        return None
-    mesh.rotate(rotation, center=(0.0, 0.0, 0.0))  # align exactly like the cloud
-    return mesh.sample_points_uniformly(number_of_points=n_points)
+@dataclass
+class Scene:
+    """Everything computed for one prepared scan — shared by the preview renderer and 3D viewer."""
+    stem: str
+    bin_type: str
+    aligned: o3d.geometry.PointCloud
+    scene_vis: o3d.geometry.PointCloud            # dense mesh-sampled backdrop (readable)
+    mesh: o3d.geometry.TriangleMesh | None        # gravity-aligned Poisson mesh (dollhouse)
+    geometry: object
+    footprint: object
+    fs: object
+    wall_mask: np.ndarray
+    result: "placement.PlacementResult"
+    existing: list
+    entrances: list
+    enclosed: bool
+    clicked: bool
+    address: str | None
+    floor_height: float
+    rotation: np.ndarray
 
 
-def analyze_and_render(stem: str, bin_type: str) -> dict:
-    """Compute room geometry, free space and bin placement for one prepared scan, render all
-    preview PNGs, and return a stats dict (also written to stats.json)."""
+def compute_scene(stem: str, bin_type: str) -> Scene:
+    """Load/reconstruct the scan and compute room geometry, free space, entrances and bin
+    placement. Shared by analyze_and_render (writes PNGs) and place3d (the 3D viewer)."""
     zip_path = RAW_DIR / f"{stem}.zip"
     cache_cloud = CACHE_ROOT / stem / "cloud.ply"
     ply = str(cache_cloud) if cache_cloud.exists() else None
-    config = ReconstructionConfig(min_confidence=255, max_depth_m=5.0)
-    pcd, archive, _ = load_point_cloud(zip_path, ply, config)
+    pcd, archive, _ = load_point_cloud(zip_path, ply, ReconstructionConfig(min_confidence=255, max_depth_m=5.0))
 
     geometry, aligned = backbone.analyze(pcd)
     footprint = geometry.footprint
     fs = freespace.compute_free_space(aligned, geometry.floor_height_m, footprint)
     rotation = geometry.rotation if geometry.rotation is not None else np.eye(3)
 
-    # dense, readable backdrop sampled from the Poisson mesh (raw cloud is too sparse to make out)
-    scene_vis = _mesh_scene(stem, rotation) or aligned
-
-    out = preview_dir(stem)
-    out.mkdir(parents=True, exist_ok=True)
-    render.annotated_topdown(scene_vis, footprint, out / "room_topdown.png")
-    render.freespace_over_scene(scene_vis, fs, out / "freespace_over_scene.png")
-
-    existing = load_existing_bins(stem, rotation)
+    mesh = None
     poisson = CACHE_ROOT / stem / "mesh_poisson.ply"
     if poisson.exists():
-        wall_points = np.asarray(o3d.io.read_triangle_mesh(str(poisson)).vertices) @ rotation.T
+        loaded = o3d.io.read_triangle_mesh(str(poisson))
+        if loaded.has_triangles():
+            loaded.rotate(rotation, center=(0.0, 0.0, 0.0))  # gravity-align like the cloud
+            mesh = loaded
+    if mesh is not None and mesh.has_vertex_colors():
+        scene_vis = mesh.sample_points_uniformly(number_of_points=1_000_000)  # readable backdrop
     else:
-        wall_points = np.asarray(aligned.points)
+        scene_vis = aligned
+
+    existing = load_existing_bins(stem, rotation)
+    wall_points = np.asarray(mesh.vertices) if mesh is not None else np.asarray(aligned.points)
     wall_mask = placement.build_wall_mask(fs, wall_points, geometry.floor_height_m, existing)
     camera_world = np.array([archive.keyframe(ts).pose_cam_to_world[:3, 3] for ts in archive.timestamps])
     camera_xz = (camera_world @ rotation.T)[:, [0, 2]]
+
     # a room scanned with the door shut is a sealed box (only scan holes) — no way in, so skip it
     enclosed = doors.is_enclosed(fs, footprint, wall_mask)
     clicked = set_entrance.load_entrances(stem)  # stored in the original frame (like the boxes)
     if enclosed:
-        entrances = []  # [] (not None) tells find_placements there is no entrance -> no placements
+        entrances: list = []  # [] (not None) tells find_placements there is no entrance
     elif clicked:
         clicked3d = np.array([[x, 0.0, z] for x, z in clicked]) @ rotation.T
         entrances = [(float(p[0]), float(p[2])) for p in clicked3d]
     else:
         entrances = doors.find_doors(fs, footprint, wall_mask, camera_xz)
+
     length, _, width = BIN_TYPES[bin_type]
-    # the push-corridor need only be as wide as the SHORTEST side of the LARGEST real bin
-    _real = ("2-hjuls dunk", "4-hjuls container")
-    _largest = max(_real, key=lambda t: BIN_TYPES[t][0] * BIN_TYPES[t][2])  # largest footprint area
-    passage_width = min(BIN_TYPES[_largest][0], BIN_TYPES[_largest][2])
+    # fill the room with a MIX of the real bin types, largest first; the push-corridor need only be
+    # as wide as the SHORTEST side of the LARGEST bin
+    real = sorted(("4-hjuls container", "2-hjuls dunk"),
+                  key=lambda t: BIN_TYPES[t][0] * BIN_TYPES[t][2], reverse=True)
+    bin_specs = [(t, BIN_TYPES[t][0], BIN_TYPES[t][2]) for t in real]
+    passage_width = min(BIN_TYPES[real[0]][0], BIN_TYPES[real[0]][2])
     result = placement.find_placements(
         fs, camera_xz, (length, width), bin_type, wall_mask=wall_mask,
         wall_angle_deg=footprint.angle_deg, existing_bins=existing, entrance_override=entrances,
-        passage_width=passage_width,
+        passage_width=passage_width, bin_specs=bin_specs,
     )
-    render.placements_over_scene(scene_vis, result, out / "placements.png")
+    address = _address(archive)
+    archive.close()
+    return Scene(stem, bin_type, aligned, scene_vis, mesh, geometry, footprint, fs, wall_mask, result,
+                 existing, entrances, enclosed, bool(clicked), address, geometry.floor_height_m, rotation)
+
+
+def analyze_and_render(stem: str, bin_type: str) -> dict:
+    """Compute one scan and render all preview PNGs; returns (and writes) a stats dict."""
+    scene = compute_scene(stem, bin_type)
+    out = preview_dir(stem)
+    out.mkdir(parents=True, exist_ok=True)
+    render.annotated_topdown(scene.scene_vis, scene.footprint, out / "room_topdown.png")
+    render.freespace_over_scene(scene.scene_vis, scene.fs, out / "freespace_over_scene.png")
+    render.placements_over_scene(scene.scene_vis, scene.result, out / "placements.png")
 
     stats = {
         "scan": stem,
         "bin_type": bin_type,
-        "length_m": round(footprint.length_m, 2),
-        "width_m": round(footprint.width_m, 2),
-        "area_m2": round(footprint.area_m2, 1),
-        "indoor": bool(geometry.is_indoor),
-        "room_height_m": round(geometry.room_height_m, 2),
-        "n_existing": len(existing),
-        "free_area_m2": round(fs.free_area_m2, 1),
-        "n_candidates": len(result.candidates),
-        "n_entrances": len(result.entrances),
-        "closed_room": bool(enclosed),
-        "entrance_source": "innesperret" if enclosed else ("klikket" if clicked else "auto"),
-        "address": _address(archive),
+        "length_m": round(scene.footprint.length_m, 2),
+        "width_m": round(scene.footprint.width_m, 2),
+        "area_m2": round(scene.footprint.area_m2, 1),
+        "indoor": bool(scene.geometry.is_indoor),
+        "room_height_m": round(scene.geometry.room_height_m, 2),
+        "n_existing": len(scene.existing),
+        "free_area_m2": round(scene.fs.free_area_m2, 1),
+        "n_candidates": len(scene.result.candidates),
+        "n_entrances": len(scene.result.entrances),
+        "closed_room": bool(scene.enclosed),
+        "entrance_source": "innesperret" if scene.enclosed else ("klikket" if scene.clicked else "auto"),
+        "address": scene.address,
     }
     (out / "stats.json").write_text(json.dumps(stats, indent=2), encoding="utf-8")
-    archive.close()
     return stats

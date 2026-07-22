@@ -6,6 +6,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import open3d as o3d
+from scipy.ndimage import binary_dilation
 
 
 def _fill_speckle(image: np.ndarray, kernel: int = 3) -> np.ndarray:
@@ -166,12 +167,15 @@ def placements_over_scene(
     order = np.argsort(p[:, 1])
     base = np.zeros((rows, cols, 3), np.uint8)
     base[row_idx[order], col_idx[order]] = (c[order][:, ::-1] * 255).astype(np.uint8)
-    base[result.walkway] = (base[result.walkway] * 0.5 + np.array([0, 210, 210]) * 0.5).astype(np.uint8)
-    # blue tint = the corridor a large bin can actually be wheeled through, all the way to a door;
-    # candidates land ONLY here, so anything outside it was rejected for having no clear path
-    if getattr(result, "reachable", None) is not None:
-        reach = result.reachable & ~result.walkway
-        base[reach] = (base[reach] * 0.55 + np.array([235, 160, 60]) * 0.45).astype(np.uint8)
+    # blue = the push-path: a near-straight corridor from the entrance to (and around) every
+    # existing bin, wide enough for the biggest bin. It is kept clear — no new bin sits on it —
+    # so the bins already in the room can always be wheeled out.
+    if getattr(result, "reachable", None) is not None and result.reachable is not None:
+        reach = result.reachable
+        base[reach] = (base[reach] * 0.5 + np.array([235, 160, 60]) * 0.5).astype(np.uint8)
+    if getattr(result, "route", None) is not None and result.route is not None:
+        line = binary_dilation(result.route, iterations=1)
+        base[line] = (base[line] * 0.25 + np.array([255, 120, 20]) * 0.75).astype(np.uint8)
 
     scale = max(int(px_per_m * cell), 1)
     image = cv2.resize(base, (cols * scale, rows * scale), interpolation=cv2.INTER_NEAREST)
@@ -202,8 +206,8 @@ def placements_over_scene(
         cv2.putText(image, "inngang", (ex + 10, ey), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
 
     cv2.putText(
-        image, f"{len(result.candidates)} nye plasser (gronn) | bla=klar sti for stor kasse | "
-        "gul=gangsti | rod=eksisterende",
+        image, f"{len(result.candidates)} nye plasser (gronn) | bla=skyve-sti til inngang | "
+        "rod=eksisterende | rosa=inngang",
         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (60, 220, 60), 2,
     )
     cv2.imwrite(str(Path(out_path)), image)

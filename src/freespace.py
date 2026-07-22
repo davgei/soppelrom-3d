@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import open3d as o3d
+from scipy.ndimage import label, median_filter
 
 from .backbone import Footprint
 
@@ -35,6 +36,7 @@ def compute_free_space(
     footprint: Footprint,
     obstacle_min_height: float = 0.08,
     obstacle_max_height: float = 2.0,
+    min_obstacle_area_m2: float = 0.06,
 ) -> FreeSpaceResult:
     cell = footprint.cell
     origin = footprint.origin
@@ -42,15 +44,36 @@ def compute_free_space(
     rows, cols = floor_observed.shape
 
     points = np.asarray(aligned_pcd.points)
-    height = points[:, 1] - floor_height
-    obstacles = points[(height > obstacle_min_height) & (height < obstacle_max_height)]
+    col_all = np.floor((points[:, 0] - origin[0]) / cell).astype(int)  # X -> column
+    row_all = np.floor((points[:, 2] - origin[1]) / cell).astype(int)  # Z -> row
+    inside = (col_all >= 0) & (col_all < cols) & (row_all >= 0) & (row_all < rows)
+    col_all, row_all, y = col_all[inside], row_all[inside], points[inside, 1]
 
+    # Local ground height per cell instead of one global floor plane. Outdoor yards slope and are
+    # uneven, so measuring obstacle height from a single plane wrongly flags the far, empty end of
+    # the floor as "occupied" (it drifts a few cm off the plane). Taking the lowest scanned point in
+    # each cell as that cell's ground lets the free-space test follow the actual slope. A light
+    # median smooth removes single-cell wells (stray low points) without spanning real obstacles.
+    ground = np.full((rows, cols), np.inf)
+    np.minimum.at(ground, (row_all, col_all), y)
+    ground[~np.isfinite(ground)] = floor_height
+    ground = median_filter(ground, size=3)
+
+    above = y - ground[row_all, col_all]
+    obs = (above > obstacle_min_height) & (above < obstacle_max_height)
     occupied = np.zeros((rows, cols), dtype=bool)
-    if len(obstacles):
-        col_idx = np.floor((obstacles[:, 0] - origin[0]) / cell).astype(int)  # X -> column
-        row_idx = np.floor((obstacles[:, 2] - origin[1]) / cell).astype(int)  # Z -> row
-        inside = (col_idx >= 0) & (col_idx < cols) & (row_idx >= 0) & (row_idx < rows)
-        occupied[row_idx[inside], col_idx[inside]] = True
+    occupied[row_all[obs], col_all[obs]] = True
+
+    # tiny occupied specks (a shoe, scan noise) can be pushed aside — treat them as free floor, not
+    # as obstacles, so the free area is not eaten by red slivers. Real obstacles (bins, walls,
+    # clutter) are large connected regions and survive.
+    if occupied.any():
+        labels, n = label(occupied)
+        if n:
+            sizes = np.bincount(labels.ravel())
+            min_cells = max(1, int(min_obstacle_area_m2 / (cell * cell)))
+            tiny = np.isin(labels, np.flatnonzero(sizes < min_cells)) & (labels > 0)
+            occupied = occupied & ~tiny
 
     free = floor_observed & ~occupied
     area_per_cell = cell * cell

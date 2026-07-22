@@ -174,9 +174,10 @@ class Dashboard:
                    command=lambda: self._generate([self._selected()])).pack(side="left", padx=4)
         ttk.Button(actions, text="Generer alle (⇧G)", command=self._generate_all).pack(side="left", padx=4)
         separator()
-        ttk.Button(actions, text="Åpne i 3D (O)", command=self._open_3d).pack(side="left", padx=4)
+        ttk.Button(actions, text="Åpne i 3D — plassering (O)", command=self._open_3d).pack(side="left", padx=4)
         ttk.Button(actions, text="Annotér (A)", command=self._annotate).pack(side="left", padx=4)
-        ttk.Button(actions, text="Forbered rå skann (F)", command=self._prepare).pack(side="left", padx=4)
+        ttk.Button(actions, text="Forbered: bygg 3D + finn kasser (F)",
+                   command=self._prepare).pack(side="left", padx=4)
 
         statusbar = ttk.Frame(self.root, style="Panel.TFrame")
         statusbar.pack(fill="x", side="bottom")
@@ -285,7 +286,8 @@ class Dashboard:
         for stem in stems:
             try:
                 if not pipeline.is_prepared(stem):
-                    self._set_status(f"Forbereder {stem} … (kan ta et par minutter)")
+                    self._set_status(f"Forbereder {stem}: bygger punktsky + 3D-mesh og kjører "
+                                     "kasse-deteksjon → forslag … (kan ta et par minutter)")
                     subprocess.run(
                         [sys.executable, "-m", "src.prepare_scan", "--scan", str(pipeline.RAW_DIR / f"{stem}.zip")],
                         cwd=str(pipeline.PROJECT_ROOT),
@@ -324,11 +326,10 @@ class Dashboard:
         )
 
     def _open_3d(self) -> None:
-        paths = self._scan_paths()
-        if paths:
-            self._launch("src.analyze_room", "--scan", paths[0], "--ply", paths[1],
-                         "--place", self.bin_type.get(), "--view")
-            self._set_status("Åpner 3D-visning …")
+        stem = self._selected()
+        if stem:
+            self._launch("src.place3d", "--scan", stem, "--bin-type", self.bin_type.get())
+            self._set_status("Åpner 3D-visning (plassering + skyve-sti) — bla med pil venstre/høyre …")
 
     def _annotate(self) -> None:
         stem = self._selected()

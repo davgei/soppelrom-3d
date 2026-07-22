@@ -12,7 +12,15 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
-from scipy.ndimage import binary_dilation, distance_transform_edt, label
+from scipy.ndimage import (
+    binary_closing,
+    binary_dilation,
+    binary_erosion,
+    distance_transform_edt,
+    label,
+)
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import dijkstra
 
 from .freespace import FreeSpaceResult
 
@@ -24,6 +32,7 @@ class Candidate:
     length_m: float
     width_m: float
     clearance_m: float     # distance from the bin centre to the nearest wall/obstacle
+    bin_type: str = ""     # which bin type this slot is sized for (mixed packing)
 
 
 @dataclass
@@ -37,7 +46,8 @@ class PlacementResult:
     entrances: list[tuple[float, float]]
     bin_type: str
     existing_bins: list[tuple[float, float, float, float, float]]
-    reachable: np.ndarray | None = None  # floor a large bin can be wheeled to an entrance
+    reachable: np.ndarray | None = None  # push-path corridor (blue): entrance -> around existing bins
+    route: np.ndarray | None = None      # thin near-straight route skeleton the corridor is grown from
 
 
 def _to_cells(points_xz: np.ndarray, origin: np.ndarray, cell: float, shape: tuple[int, int]):
@@ -146,8 +156,11 @@ def reachable_from_entrance(
     reachable = np.zeros(rollable.shape, dtype=bool)
     if not entrances or not rollable.any():
         return reachable
-    clearance = distance_transform_edt(rollable) * cell
-    corridor = rollable & (clearance >= passage_width / 2 + margin)
+    # bridge small clutter holes first ("push it aside") so scattered debris doesn't fragment the
+    # corridor and make a genuinely walkable room look impassable
+    walkable = binary_closing(rollable, iterations=max(1, int(0.15 / cell)))
+    clearance = distance_transform_edt(walkable) * cell
+    corridor = walkable & (clearance >= passage_width / 2 + margin)
     if not corridor.any():
         return reachable
     labels, _ = label(corridor)
@@ -162,6 +175,237 @@ def reachable_from_entrance(
     return reachable
 
 
+def _box_mask(rect: tuple, origin: np.ndarray, cell: float, shape: tuple[int, int], grow: float = 0.0) -> np.ndarray:
+    """Boolean grid of the footprint of one oriented box (optionally grown by `grow` metres)."""
+    (cx, cz), (length, width), angle = rect
+    box = cv2.boxPoints(((cx, cz), (length + grow, width + grow), angle))
+    mask = np.zeros(shape, np.uint8)
+    pts = np.stack([(box[:, 0] - origin[0]) / cell, (box[:, 1] - origin[1]) / cell], axis=1)
+    cv2.fillPoly(mask, [pts.astype(np.int32)], 1)
+    return mask.astype(bool)
+
+
+def _boxes_mask(bins, origin: np.ndarray, cell: float, shape: tuple[int, int], grow: float = 0.0) -> np.ndarray:
+    mask = np.zeros(shape, dtype=bool)
+    for bx, bz, bl, bw, byaw in bins:
+        mask |= _box_mask(((bx, bz), (bl, bw), byaw), origin, cell, shape, grow)
+    return mask
+
+
+def _nearest_true(mask: np.ndarray, row: int, col: int) -> tuple[int, int] | None:
+    """The cell in `mask` closest to (row, col); None if the mask is empty."""
+    if not mask.any():
+        return None
+    ys, xs = np.where(mask)
+    k = int(np.argmin((ys - row) ** 2 + (xs - col) ** 2))
+    return int(ys[k]), int(xs[k])
+
+
+def _grid_graph(passable: np.ndarray, node_cost: np.ndarray):
+    """8-connected shortest-path graph over the passable cells. Edge weight = step length x the
+    mean traversal cost of its two endpoints, so a route prefers wide, open floor and only squeezes
+    through narrow gaps when it must. Returns (csr graph, node-id grid, row coords, col coords)."""
+    rows, cols = passable.shape
+    node_id = -np.ones((rows, cols), dtype=np.int64)
+    ys, xs = np.where(passable)
+    node_id[ys, xs] = np.arange(ys.size)
+    src, dst, wgt = [], [], []
+    for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]:
+        step = float(np.hypot(dr, dc))
+        r0, r1 = max(0, -dr), rows - max(0, dr)
+        c0, c1 = max(0, -dc), cols - max(0, dc)
+        a = node_id[r0:r1, c0:c1]
+        b = node_id[r0 + dr:r1 + dr, c0 + dc:c1 + dc]
+        ca = node_cost[r0:r1, c0:c1]
+        cb = node_cost[r0 + dr:r1 + dr, c0 + dc:c1 + dc]
+        m = (a >= 0) & (b >= 0)
+        src.append(a[m]); dst.append(b[m]); wgt.append(step * 0.5 * (ca[m] + cb[m]))
+    n = ys.size
+    graph = coo_matrix((np.concatenate(wgt), (np.concatenate(src), np.concatenate(dst))),
+                       shape=(n, n)).tocsr()
+    return graph, node_id, ys, xs
+
+
+def route_corridor(
+    fs: FreeSpaceResult,
+    rollable: np.ndarray,
+    entrances: list[tuple[float, float]],
+    targets: list[tuple[float, float]],
+    passage_width: float,
+    margin: float = 0.05,
+    closing_m: float = 0.15,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The push-path: a NEAR-STRAIGHT route from an entrance to (and around) every existing bin,
+    plus a corridor grown to the width of the largest bin.
+
+    Returns (route, corridor, region):
+      route    — the thin shortest-path skeleton (entrance -> each target), no big detours;
+      corridor — that route widened to passage_width and clipped to real floor (the sacred path);
+      region   — ALL floor reachable from an entrance at all (used to test if a new bin can be
+                 wheeled in). Uses a cost-based shortest path (narrow gaps cost more but are not
+                 blocked), so clutter no longer shatters the path into holes the way a hard
+                 minimum-width mask does. With no entrance nothing is reachable."""
+    cell = fs.cell
+    origin = fs.origin
+    shape = fs.free.shape
+    empty = np.zeros(shape, dtype=bool)
+    # bridge small clutter gaps ("push it aside") so a route can thread through a messy room
+    passable = rollable | (binary_closing(rollable, iterations=max(1, int(closing_m / cell))) & fs.floor_observed)
+    if not passable.any() or not entrances:
+        return empty, empty, empty
+
+    clearance = distance_transform_edt(passable) * cell
+    short = np.maximum(0.0, passage_width / 2 + margin - clearance)  # metres the bin is too wide by
+    node_cost = 1.0 + 2.5 * (short / cell)                          # narrow => costly, open => cheap
+    graph, node_id, ys, xs = _grid_graph(passable, node_cost)
+    if ys.size == 0:
+        return empty, empty, empty
+
+    ent_nodes = []
+    for ex, ez in entrances:
+        c = int(round((ex - origin[0]) / cell))
+        r = int(round((ez - origin[1]) / cell))
+        near = _nearest_true(passable, r, c)
+        if near is not None:
+            ent_nodes.append(int(node_id[near]))
+    ent_nodes = sorted(set(e for e in ent_nodes if e >= 0))
+    if not ent_nodes:
+        return empty, empty, empty
+
+    dist, pred, _ = dijkstra(graph, directed=False, indices=ent_nodes,
+                             return_predecessors=True, min_only=True)
+    finite = np.isfinite(dist)
+    region = empty.copy()
+    region[ys[finite], xs[finite]] = True
+
+    route = empty.copy()
+    for tx, tz in targets:
+        c = int(round((tx - origin[0]) / cell))
+        r = int(round((tz - origin[1]) / cell))
+        near = _nearest_true(region, r, c)  # snap the bin to the nearest reachable cell
+        if near is None:
+            continue
+        node = int(node_id[near])
+        guard = 0
+        while node >= 0 and guard < ys.size + 5:
+            route[ys[node], xs[node]] = True
+            node = int(pred[node])  # -9999 at an entrance (source)
+            guard += 1
+
+    corridor = empty.copy()
+    if route.any():
+        corridor = binary_dilation(route, iterations=max(1, int(passage_width / 2 / cell))) & passable
+    return route, corridor, region
+
+
+def pack_placements(
+    fs: FreeSpaceResult,
+    wall_mask: np.ndarray | None,
+    accessible: np.ndarray,
+    entrances: list[tuple[float, float]],
+    existing_bins: list,
+    bin_specs: list[tuple[str, float, float]],
+    passage_width: float,
+    wall_angle_deg: float = 0.0,
+    margin: float = 0.20,
+    spacing: float = 0.15,
+    max_bins: int = 40,
+    wall_weight: float = 3.0,
+    near_weight: float = 1.0,
+) -> tuple[list[Candidate], np.ndarray, np.ndarray]:
+    """Fill free floor with a MIX of bin types (bin_specs = (name, length, width), largest first).
+
+    Order of priority, matching how the user reasons about it:
+      1. lay the push-path FIRST — a near-straight route from a door to every existing bin — and
+         treat it as SACRED: no new bin may sit on it (so the existing bins can always be wheeled
+         out), EXCEPT a small apron right around each existing bin, which is reclaimed as usable
+         floor so new bins can line up next to the old ones;
+      2. then fill the remaining free floor, hugging the walls/edges and clustering near the
+         existing bins. Bins never overlap; each must be reachable from a door.
+    Returns (candidates, corridor, route)."""
+    cell, origin = fs.cell, fs.origin
+    shape = fs.free.shape
+    free_acc = fs.free & accessible
+    existing_centers = [(b[0], b[1]) for b in existing_bins]
+    occ = _boxes_mask(existing_bins, origin, cell, shape, grow=0.10)
+
+    # 1) the push-path, computed once and then frozen
+    route, corridor, region = route_corridor(fs, free_acc & ~occ, entrances, existing_centers, passage_width)
+    apron = binary_dilation(_boxes_mask(existing_bins, origin, cell, shape, grow=0.0),
+                            iterations=max(1, int(0.55 / cell)))  # reclaimable ring around each bin
+    protected = corridor & ~apron
+    placeable_region = region | binary_dilation(corridor, iterations=1)  # floor reachable from a door
+
+    # wall/edge preference: a real bin stands against a WALL — the room's perimeter or a detected
+    # tall wall — not marooned in the open middle and not clinging to a stray clutter island in the
+    # centre. So "wall" = the outer rim of the observed floor plus any tall wall, and `wall_dist`
+    # measures how far a spot is from it: ~0 against a wall, large out in the open.
+    perimeter = fs.floor_observed & ~binary_erosion(fs.floor_observed, iterations=2)
+    walls = perimeter | wall_mask if wall_mask is not None else perimeter
+    wall_dist_map = distance_transform_edt(~walls) * cell if walls.any() else np.full(shape, 5.0)
+
+    from . import place_prior  # local import: keeps placement importable without torch present
+    prior = place_prior.cached_prior()
+    dist_wall, clearance = (place_prior.scene_feature_maps(fs, wall_mask)
+                            if prior is not None else (None, None))
+    placed_centers: list[tuple[float, float]] = []
+    placed: list[Candidate] = []
+
+    def _wall_m(xz: tuple[float, float]) -> float:
+        c = int(np.clip((xz[0] - origin[0]) / cell, 0, shape[1] - 1))
+        r = int(np.clip((xz[1] - origin[1]) / cell, 0, shape[0] - 1))
+        return float(wall_dist_map[r, c])
+
+    def _try(spot: Candidate, name: str, length: float, width: float) -> None:
+        nonlocal occ
+        cand_mask = _box_mask(spot.rect, origin, cell, shape, grow=spacing)
+        if (cand_mask & occ).any():
+            return  # overlaps an existing/placed bin
+        if (cand_mask & protected).any():
+            return  # sits on the sacred push-path
+        if not (cand_mask & placeable_region).any():
+            return  # cannot be wheeled here from a door
+        placed.append(Candidate(spot.center_xz, spot.rect, length, width, spot.clearance_m, bin_type=name))
+        occ = occ | cand_mask
+        placed_centers.append(spot.center_xz)
+
+    def _rank(spots: list[Candidate]) -> list[Candidate]:
+        if not spots:
+            return spots
+        wall_bonus = np.array([np.clip(1.0 - _wall_m(c.center_xz) / 1.5, 0.0, 1.0) for c in spots])
+        if existing_centers:
+            ex = np.array(existing_centers)
+            near = np.array([float(np.min(np.hypot(ex[:, 0] - c.center_xz[0], ex[:, 1] - c.center_xz[1])))
+                             for c in spots])
+            near_bonus = np.clip(1.0 - near / 3.0, 0.0, 1.0)
+        else:
+            near_bonus = np.zeros(len(spots))
+        if prior is not None:  # learned prior: how much the spot looks like where bins really stand
+            others = existing_centers + placed_centers
+            feats = [place_prior.features_at(c.center_xz, fs, dist_wall, clearance, others, entrances)
+                     for c in spots]
+            base = np.array(prior.score(feats))
+        else:
+            base = np.zeros(len(spots))
+        score = base + wall_weight * wall_bonus + near_weight * near_bonus
+        return [s for _, s in sorted(zip(score, spots), key=lambda pair: -float(pair[0]))]
+
+    pool = max(4 * max_bins, 30)  # a generous pool so ranking can actually choose the best spots
+    for name, length, width in bin_specs:  # largest first
+        # bins hug the edge of the free floor; open middle only if the room has no wall-adjacent room
+        spots = _wall_candidates(free_acc & ~occ, walls, length, width, origin, cell, spacing, pool)
+        if not spots:
+            spots = _open_floor_candidates(free_acc & ~occ, wall_angle_deg, length, width, margin,
+                                           origin, cell, existing_bins, spacing, pool)
+        for spot in _rank(spots):
+            if len(placed) >= max_bins:
+                break
+            _try(spot, name, length, width)
+        if len(placed) >= max_bins:
+            break
+    return placed, corridor, route
+
+
 def _box_corners(center, wall_dir, inward, along, into) -> np.ndarray:
     return np.array(
         [
@@ -173,12 +417,20 @@ def _box_corners(center, wall_dir, inward, along, into) -> np.ndarray:
     )
 
 
-def _box_fits(allowed: np.ndarray, corners: np.ndarray, origin: np.ndarray, cell: float) -> bool:
+def _box_fits(allowed: np.ndarray, corners: np.ndarray, origin: np.ndarray, cell: float,
+              tol: float = 0.0) -> bool:
+    """True if the box footprint lands on `allowed` floor. `tol` is the fraction of the footprint
+    permitted to fall outside — a little slack so a bin can still hug a jagged, real-world edge
+    instead of being pushed metres into the open just to clear the ragged scan boundary."""
     mask = np.zeros(allowed.shape, np.uint8)
     pts = np.stack([(corners[:, 0] - origin[0]) / cell, (corners[:, 1] - origin[1]) / cell], axis=1)
     cv2.fillPoly(mask, [pts.astype(np.int32).reshape(-1, 1, 2)], 1)
     covered = mask.astype(bool)
-    return bool(covered.any()) and not bool(np.any(covered & ~allowed))
+    total = int(covered.sum())
+    if total == 0:
+        return False
+    outside = int((covered & ~allowed).sum())
+    return outside <= tol * total
 
 
 def _wall_candidates(
@@ -192,12 +444,14 @@ def _wall_candidates(
     max_candidates: int,
     wall_gap: float = 0.10,
 ) -> list[Candidate]:
-    """Place bins hugging the ACTUAL walls: a bin sits where the distance to the nearest wall
-    equals length/2 + gap (its short side then rests against the wall), oriented by the wall
-    normal so it sticks `length` into the room and spans `width` along the wall. Greedy along
-    each wall so they sit next to each other with a small gap."""
+    """Place bins hugging the walls / edge of the free floor. A bin parks with its back a small gap
+    from the wall and its LONG side along the wall (short side into the room — how bins actually
+    stand), oriented by the local wall normal. Candidates are generated densely along every edge
+    and a little slack is allowed at ragged edges; the caller ranks and de-conflicts them."""
     if wall_mask is None or not wall_mask.any():
         return []
+    span = max(length, width)   # runs along the wall
+    depth = min(length, width)  # sticks into the room
     distance, (row_idx, col_idx) = distance_transform_edt(~wall_mask, return_indices=True)
     distance_m = distance * cell
     rows, cols = free_acc.shape
@@ -205,8 +459,8 @@ def _wall_candidates(
     dir_col = xx - col_idx  # world X points along columns
     dir_row = yy - row_idx  # world Z points along rows
 
-    target = length / 2 + wall_gap
-    band = free_acc & (np.abs(distance_m - target) < cell * 1.5)
+    target = depth / 2 + wall_gap
+    band = free_acc & (distance_m >= target - cell) & (distance_m <= target + cell * 8)
     ys, xs = np.where(band)
     if not len(xs):
         return []
@@ -225,8 +479,8 @@ def _wall_candidates(
         inward /= norm
         wall_dir = np.array([-inward[1], inward[0]])
         ctr = np.array([origin[0] + (c0 + 0.5) * cell, origin[1] + (r0 + 0.5) * cell])
-        box = _box_corners(ctr, wall_dir, inward, width, length)
-        if _box_fits(free_acc & ~taken, box, origin, cell):
+        box = _box_corners(ctr, wall_dir, inward, span, depth)
+        if _box_fits(free_acc & ~taken, box, origin, cell, tol=0.12):
             rect = cv2.minAreaRect(box.astype(np.float32))
             candidates.append(Candidate((float(ctr[0]), float(ctr[1])), rect, float(length), float(width), float(distance_m[r0, c0])))
             mask = np.zeros(free_acc.shape, np.uint8)
@@ -300,8 +554,9 @@ def find_placements(
     entrance_clear_radius: float = 1.0,
     pull_out_lane: float = 1.0,
     spacing: float = 0.15,
-    max_candidates: int = 12,
+    max_candidates: int = 8,
     passage_width: float | None = None,
+    bin_specs: list[tuple[str, float, float]] | None = None,
 ) -> PlacementResult:
     """existing_bins: (cx, cz, length, width, yaw_deg) per already-present bin, in the aligned frame.
     New bins line up NEXT TO them (ranked by proximity) and never sit in their pull-out lane.
@@ -368,28 +623,32 @@ def find_placements(
             apron |= (along > -0.1) & (along < pull_out_lane) & (perp <= max(bw, width) / 2 + 0.1)
         free_acc = free_acc & (occupied == 0) & (~apron)
 
-    # 1) preferred: line the bins up along the walls, short side to the wall
-    candidates = _wall_candidates(
-        free_acc, wall_mask, length, width, origin, cell, spacing, max_candidates
-    )
-    # 2) fallback (no wall spots): most wall-hugging open-floor fits
-    if not candidates:
-        candidates = _open_floor_candidates(
-            free_acc, wall_angle_deg, length, width, margin, origin, cell,
-            existing_bins, spacing, max_candidates,
-        )
-
-    # 3) keep only spots the bin can actually be WHEELED to a door (clear path the whole way,
-    #    wide enough for the largest bin), not just spots with room at the exit
     passage = passage_width if passage_width is not None else min(length, width)
-    reachable = reachable_from_entrance(fs, rollable, entrances, passage)
+    route = None
+    if bin_specs is not None:
+        # multi-type: lay the push-path first (sacred), then fill the remaining free floor with a
+        # MIX of bin types hugging the walls and clustering near the existing bins, never overlapping
+        candidates, reachable, route = pack_placements(
+            fs, wall_mask, accessible, entrances, existing_bins, bin_specs, passage,
+            wall_angle_deg=wall_angle_deg, margin=margin, spacing=spacing, max_bins=max_candidates,
+        )
+    else:
+        # legacy single-type: wall-hugging spots (open-floor fallback), then keep only those a bin
+        # can be wheeled to a door
+        candidates = _wall_candidates(free_acc, wall_mask, length, width, origin, cell, spacing, max_candidates)
+        if not candidates:
+            candidates = _open_floor_candidates(
+                free_acc, wall_angle_deg, length, width, margin, origin, cell,
+                existing_bins, spacing, max_candidates,
+            )
+        reachable = reachable_from_entrance(fs, rollable, entrances, passage)
 
-    def _reachable(center_xz: tuple[float, float]) -> bool:
-        col = int((center_xz[0] - origin[0]) / cell)
-        row = int((center_xz[1] - origin[1]) / cell)
-        return 0 <= row < rows and 0 <= col < cols and bool(reachable[row, col])
+        def _reachable(center_xz: tuple[float, float]) -> bool:
+            col = int((center_xz[0] - origin[0]) / cell)
+            row = int((center_xz[1] - origin[1]) / cell)
+            return 0 <= row < rows and 0 <= col < cols and bool(reachable[row, col])
 
-    candidates = [c for c in candidates if _reachable(c.center_xz)]
+        candidates = [c for c in candidates if _reachable(c.center_xz)]
 
     return PlacementResult(
         cell=cell,
@@ -402,4 +661,5 @@ def find_placements(
         bin_type=bin_type,
         existing_bins=existing_bins,
         reachable=reachable,
+        route=route,
     )

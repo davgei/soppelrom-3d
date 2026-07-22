@@ -149,6 +149,7 @@ def analyze(
     min_plane_frac: float = 0.03,
     min_ceiling_height_m: float = 1.2,
     indoor_coverage_threshold: float = 0.5,
+    floor_band_m: float = 0.12,
     seed: int = 42,
 ) -> tuple[RoomGeometry, o3d.geometry.PointCloud]:
     o3d.utility.random.seed(seed)  # RANSAC is randomized; seed it so results are reproducible
@@ -167,7 +168,13 @@ def analyze(
     aligned_points = np.asarray(aligned.points)
     floor_points_aligned = floor_points @ rotation.T
     floor_height = float(np.median(floor_points_aligned[:, 1]))
-    floor_xz = floor_points_aligned[:, [0, 2]]
+
+    # Footprint from ALL points within a height band of the floor (now horizontal after alignment),
+    # not just the RANSAC plane inliers: real floors are uneven (cobbles, slope), so the inliers
+    # cover only the flat centre and make the room look far too small. The band captures the true
+    # floor extent -> correct room size AND much more free space for placement.
+    near_floor = np.abs(aligned_points[:, 1] - floor_height) < floor_band_m
+    floor_xz = aligned_points[near_floor][:, [0, 2]] if near_floor.sum() >= 100 else floor_points_aligned[:, [0, 2]]
 
     footprint = _footprint(floor_xz)
 
