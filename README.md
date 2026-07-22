@@ -13,10 +13,14 @@ py -3.12 -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Repoet inneholder **kode + annoteringer + innganger + den trente modellen** (`models/bins_latest.pt`).
-Rå-skannene (`data/raw/`, ~2,3 GB) er for store for GitHub — hent dem på den nye PC-en med
-`python -m src.download_polycam --auto`, eller kopier `data/raw/`-mappa via minnepinne/OneDrive.
-`outputs/cache/` og `outputs/previews/` regenereres automatisk (menyens «Generer alle»).
+Repoet inneholder **kode + annoteringer + innganger + de trente modellene** (`models/*.pt`:
+YOLO-detektor, PointNet-verifisering og dør-modell).
+
+Store/regenererbare data ligger **lokalt, utenfor OneDrive** (så de verken synkes opp eller
+fil-låses): `%LOCALAPPDATA%\soppelrom-3d\` med `raw/`, `cache/`, `previews/` og `yolo_dataset/`.
+Overstyr plasseringen med miljøvariabelen `SOPPELROM_DATA_DIR`. Rå-skannene (~6,6 GB) er ikke på
+GitHub — hent dem på ny PC med `python -m src.download_polycam --auto`, eller kopier `raw/`-mappa
+via minnepinne. `cache/` og `previews/` regenereres automatisk (menyens «Generer alle»).
 
 ## Miljø
 
@@ -35,11 +39,22 @@ Kjør moduler slik (fra prosjektroten):
 
 ## Datastruktur
 
+Menneskearbeidet følger repoet (git); store/regenererbare data ligger lokalt under
+`SOPPELROM_DATA_DIR` (standard `%LOCALAPPDATA%\soppelrom-3d`):
+
 ```
-data/raw/     originale Polycam-eksporter (zip = rå keyframes; evt. .ply) — read-only
-outputs/      genererte punktskyer, previews, resultater
-src/          kildekode
-configs/      konfigurasjon
+# i repoet (git / GitHub):
+outputs/annotations/   dine 3D-boks-annoteringer
+outputs/entrances/     klikkede innganger
+models/*.pt            trente modeller (YOLO, PointNet-verifisering, dør)
+src/                   kildekode
+configs/               konfigurasjon
+
+# lokalt, utenfor OneDrive (SOPPELROM_DATA_DIR):
+raw/                   originale Polycam-eksporter (zip = rå keyframes) — kilde
+cache/                 punktskyer + mesh + auto-forslag (regenereres)
+previews/              genererte resultatbilder (regenereres)
+yolo_dataset/          eksportert YOLO-treningssett (regenereres)
 ```
 
 ## Punktsky (Fase 0/1)

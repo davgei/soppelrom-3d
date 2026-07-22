@@ -17,11 +17,7 @@ from .annotations import BIN_TYPES, load_annotations
 from .loader import load_point_cloud
 from .reconstruct import ReconstructionConfig
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RAW_DIR = PROJECT_ROOT / "data" / "raw"
-CACHE_ROOT = PROJECT_ROOT / "outputs" / "cache"
-ANNOTATION_DIR = PROJECT_ROOT / "outputs" / "annotations"
-PREVIEW_ROOT = PROJECT_ROOT / "outputs" / "previews"
+from .paths import ANNOTATION_DIR, CACHE_ROOT, PREVIEW_ROOT, PROJECT_ROOT, RAW_DIR
 
 
 def list_scans() -> list[str]:

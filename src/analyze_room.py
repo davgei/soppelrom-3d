@@ -12,9 +12,7 @@ from .annotations import BIN_TYPES, load_annotations
 from .loader import load_point_cloud
 from .reconstruct import ReconstructionConfig
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-ANNOTATION_DIR = PROJECT_ROOT / "outputs" / "annotations"
-CACHE_ROOT = PROJECT_ROOT / "outputs" / "cache"
+from .paths import ANNOTATION_DIR, CACHE_ROOT, PROJECT_ROOT
 
 
 def _load_existing_bins(

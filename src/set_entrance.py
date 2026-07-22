@@ -17,8 +17,7 @@ import open3d as o3d
 from .loader import load_point_cloud
 from .reconstruct import ReconstructionConfig
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-ENTRANCE_DIR = PROJECT_ROOT / "outputs" / "entrances"
+from .paths import ENTRANCE_DIR, PROJECT_ROOT
 
 
 def load_entrances(scan_stem: str) -> list[tuple[float, float]]:

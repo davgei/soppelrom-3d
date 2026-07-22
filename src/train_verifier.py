@@ -29,10 +29,7 @@ from .reconstruct import ReconstructionConfig, reconstruct
 from .scan_io import ScanArchive
 from .verify_bins import EXTRA_DIMS, N_POINTS, BinVerifierNet, box_extra, crop_box, normalize_points
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RAW_DIR = PROJECT_ROOT / "data" / "raw"
-CACHE_ROOT = PROJECT_ROOT / "outputs" / "cache"
-ANNOTATION_DIR = PROJECT_ROOT / "outputs" / "annotations"
+from .paths import ANNOTATION_DIR, CACHE_ROOT, PROJECT_ROOT, RAW_DIR
 
 GT_MATCH_DIST = 0.5      # a proposal within this XZ distance of an annotation is the SAME bin
 NEG_CLEAR_DIST = 0.75    # random negatives must be at least this far (XZ) from every bin

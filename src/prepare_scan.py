@@ -18,10 +18,7 @@ from .reconstruct import ReconstructionConfig, reconstruct
 from .reconstruct_mesh import MeshConfig, reconstruct_mesh_poisson
 from .scan_io import ScanArchive
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CACHE_ROOT = PROJECT_ROOT / "outputs" / "cache"
-RAW_DIR = PROJECT_ROOT / "data" / "raw"
-ANNOTATION_DIR = PROJECT_ROOT / "outputs" / "annotations"
+from .paths import ANNOTATION_DIR, CACHE_ROOT, PROJECT_ROOT, RAW_DIR
 
 
 def is_prepared(zip_path: Path, cache_root: Path = CACHE_ROOT) -> bool:

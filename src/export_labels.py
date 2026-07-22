@@ -19,14 +19,9 @@ import cv2
 import numpy as np
 
 from .annotations import BIN_TYPES, STATUS_APPROVED, BinBox, load_annotations
-from .prepare_scan import ANNOTATION_DIR, PROJECT_ROOT, RAW_DIR
+from .paths import ANNOTATION_DIR, DATASET_DIR, PROJECT_ROOT, RAW_DIR
 from .scan_io import Keyframe, ScanArchive
 
-# The YOLO dataset is thousands of transient frames — keep it OUTSIDE the OneDrive-synced project
-# so it is not uploaded and cannot be file-locked mid-run (that lock is what broke --clean).
-# Override the location with SOPPELROM_DATA_DIR; defaults to %LOCALAPPDATA% (never synced).
-_data_home = os.environ.get("SOPPELROM_DATA_DIR") or os.environ.get("LOCALAPPDATA")
-DATASET_DIR = (Path(_data_home) if _data_home else Path.home() / ".cache") / "soppelrom-3d" / "yolo_dataset"
 _FLIP = np.diag([1.0, -1.0, -1.0])
 CLASS_NAMES = list(BIN_TYPES)
 
