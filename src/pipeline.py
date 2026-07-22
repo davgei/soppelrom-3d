@@ -76,6 +76,20 @@ def _address(archive) -> str | None:
         return None
 
 
+def _mesh_scene(stem: str, rotation: np.ndarray, n_points: int = 1_000_000):
+    """A dense, readable point cloud sampled from the cached Poisson mesh, gravity-aligned like the
+    scene. Used only as the VISUAL backdrop for previews (the raw cloud is too sparse to read);
+    all geometry is still computed on the real cloud. Returns None if the mesh is unusable."""
+    poisson = CACHE_ROOT / stem / "mesh_poisson.ply"
+    if not poisson.exists():
+        return None
+    mesh = o3d.io.read_triangle_mesh(str(poisson))
+    if not mesh.has_triangles() or not mesh.has_vertex_colors():
+        return None
+    mesh.rotate(rotation, center=(0.0, 0.0, 0.0))  # align exactly like the cloud
+    return mesh.sample_points_uniformly(number_of_points=n_points)
+
+
 def analyze_and_render(stem: str, bin_type: str) -> dict:
     """Compute room geometry, free space and bin placement for one prepared scan, render all
     preview PNGs, and return a stats dict (also written to stats.json)."""
@@ -88,13 +102,16 @@ def analyze_and_render(stem: str, bin_type: str) -> dict:
     geometry, aligned = backbone.analyze(pcd)
     footprint = geometry.footprint
     fs = freespace.compute_free_space(aligned, geometry.floor_height_m, footprint)
+    rotation = geometry.rotation if geometry.rotation is not None else np.eye(3)
+
+    # dense, readable backdrop sampled from the Poisson mesh (raw cloud is too sparse to make out)
+    scene_vis = _mesh_scene(stem, rotation) or aligned
 
     out = preview_dir(stem)
     out.mkdir(parents=True, exist_ok=True)
-    render.annotated_topdown(aligned, footprint, out / "room_topdown.png")
-    render.freespace_over_scene(aligned, fs, out / "freespace_over_scene.png")
+    render.annotated_topdown(scene_vis, footprint, out / "room_topdown.png")
+    render.freespace_over_scene(scene_vis, fs, out / "freespace_over_scene.png")
 
-    rotation = geometry.rotation if geometry.rotation is not None else np.eye(3)
     existing = load_existing_bins(stem, rotation)
     poisson = CACHE_ROOT / stem / "mesh_poisson.ply"
     if poisson.exists():
@@ -104,18 +121,27 @@ def analyze_and_render(stem: str, bin_type: str) -> dict:
     wall_mask = placement.build_wall_mask(fs, wall_points, geometry.floor_height_m, existing)
     camera_world = np.array([archive.keyframe(ts).pose_cam_to_world[:3, 3] for ts in archive.timestamps])
     camera_xz = (camera_world @ rotation.T)[:, [0, 2]]
+    # a room scanned with the door shut is a sealed box (only scan holes) — no way in, so skip it
+    enclosed = doors.is_enclosed(fs, footprint, wall_mask)
     clicked = set_entrance.load_entrances(stem)  # stored in the original frame (like the boxes)
-    if clicked:
+    if enclosed:
+        entrances = []  # [] (not None) tells find_placements there is no entrance -> no placements
+    elif clicked:
         clicked3d = np.array([[x, 0.0, z] for x, z in clicked]) @ rotation.T
         entrances = [(float(p[0]), float(p[2])) for p in clicked3d]
     else:
         entrances = doors.find_doors(fs, footprint, wall_mask, camera_xz)
     length, _, width = BIN_TYPES[bin_type]
+    # the push-corridor need only be as wide as the SHORTEST side of the LARGEST real bin
+    _real = ("2-hjuls dunk", "4-hjuls container")
+    _largest = max(_real, key=lambda t: BIN_TYPES[t][0] * BIN_TYPES[t][2])  # largest footprint area
+    passage_width = min(BIN_TYPES[_largest][0], BIN_TYPES[_largest][2])
     result = placement.find_placements(
         fs, camera_xz, (length, width), bin_type, wall_mask=wall_mask,
         wall_angle_deg=footprint.angle_deg, existing_bins=existing, entrance_override=entrances,
+        passage_width=passage_width,
     )
-    render.placements_over_scene(aligned, result, out / "placements.png")
+    render.placements_over_scene(scene_vis, result, out / "placements.png")
 
     stats = {
         "scan": stem,
@@ -129,7 +155,8 @@ def analyze_and_render(stem: str, bin_type: str) -> dict:
         "free_area_m2": round(fs.free_area_m2, 1),
         "n_candidates": len(result.candidates),
         "n_entrances": len(result.entrances),
-        "entrance_source": "klikket" if clicked else "auto",
+        "closed_room": bool(enclosed),
+        "entrance_source": "innesperret" if enclosed else ("klikket" if clicked else "auto"),
         "address": _address(archive),
     }
     (out / "stats.json").write_text(json.dumps(stats, indent=2), encoding="utf-8")

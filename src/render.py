@@ -8,6 +8,12 @@ import numpy as np
 import open3d as o3d
 
 
+def _fill_speckle(image: np.ndarray, kernel: int = 3) -> np.ndarray:
+    """Fill the 1-pixel gaps between rasterized surface points so a densely-sampled mesh reads as a
+    solid surface instead of speckle. Morphological close fills small holes but keeps the outline."""
+    return cv2.morphologyEx(image, cv2.MORPH_CLOSE, np.ones((kernel, kernel), np.uint8))
+
+
 def _rasterize(
     points: np.ndarray,
     colors: np.ndarray,
@@ -68,6 +74,7 @@ def annotated_topdown(
     image = np.zeros((height, width, 3), np.uint8)
     image[py[order], px[order]] = (colors[order] * 255).astype(np.uint8)
     image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    image = _fill_speckle(image)
 
     box = cv2.boxPoints(footprint.rect)
     box_px = np.clip(((box[:, 0] - u_min) * px_per_m).astype(int), 0, width - 1)
@@ -160,6 +167,11 @@ def placements_over_scene(
     base = np.zeros((rows, cols, 3), np.uint8)
     base[row_idx[order], col_idx[order]] = (c[order][:, ::-1] * 255).astype(np.uint8)
     base[result.walkway] = (base[result.walkway] * 0.5 + np.array([0, 210, 210]) * 0.5).astype(np.uint8)
+    # blue tint = the corridor a large bin can actually be wheeled through, all the way to a door;
+    # candidates land ONLY here, so anything outside it was rejected for having no clear path
+    if getattr(result, "reachable", None) is not None:
+        reach = result.reachable & ~result.walkway
+        base[reach] = (base[reach] * 0.55 + np.array([235, 160, 60]) * 0.45).astype(np.uint8)
 
     scale = max(int(px_per_m * cell), 1)
     image = cv2.resize(base, (cols * scale, rows * scale), interpolation=cv2.INTER_NEAREST)
@@ -190,8 +202,9 @@ def placements_over_scene(
         cv2.putText(image, "inngang", (ex + 10, ey), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
 
     cv2.putText(
-        image, f"{len(result.candidates)} nye plasser (gronn) | eksisterende (rod) | gul=gangsti",
-        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (60, 220, 60), 2,
+        image, f"{len(result.candidates)} nye plasser (gronn) | bla=klar sti for stor kasse | "
+        "gul=gangsti | rod=eksisterende",
+        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (60, 220, 60), 2,
     )
     cv2.imwrite(str(Path(out_path)), image)
 

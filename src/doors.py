@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-from scipy.ndimage import binary_dilation, binary_erosion
+from scipy.ndimage import binary_dilation, binary_erosion, label
 
 WEIGHTS_PATH = Path(__file__).resolve().parents[1] / "models" / "doors_latest.pt"
 
@@ -28,6 +28,7 @@ CANDIDATE_SPACING_M = 0.30   # sample a candidate roughly every this far along t
 WINDOW_M = 0.45              # local neighbourhood used to describe a candidate
 KEEP_PROB = 0.40             # find_doors keeps candidates scoring at least this (favours recall)
 MERGE_RADIUS_M = 0.8         # kept candidates closer than this are one door
+MAX_DOORS = 2                # a trash room realistically has one or two entrances, not nine
 
 _cache: dict = {}
 
@@ -104,21 +105,54 @@ def candidate_openings(fs, footprint, wall_mask: np.ndarray | None, camera_xz) -
     return candidates
 
 
-def _merge_points(points: list[tuple[float, float]], radius: float) -> list[tuple[float, float]]:
-    """Greedy-merge points closer than `radius` into their centroid (one door per cluster)."""
-    merged: list[tuple[float, float]] = []
+MIN_DOOR_M = 0.55  # a real doorway is at least this wide; narrower gaps are scan holes
+
+
+def largest_opening_m(fs, footprint, wall_mask: np.ndarray | None) -> float:
+    """Width of the widest gap in the wall ring around the floor (0 if fully walled in). A gap is
+    floor-boundary that is NOT backed by wall — i.e. somewhere you could walk out."""
+    cell = fs.cell
+    rows, cols = fs.free.shape
+    floor = footprint.mask.astype(bool)
+    wall = wall_mask if wall_mask is not None else np.zeros((rows, cols), dtype=bool)
+    outer = binary_dilation(floor, iterations=max(1, int(0.4 / cell))) & ~floor
+    wall_near = binary_dilation(wall, iterations=max(1, int(0.35 / cell)))
+    opening = outer & ~wall_near
+    labels, n = label(opening)
+    widest = 0.0
+    for i in range(1, n + 1):
+        cells = np.argwhere(labels == i)
+        extent = (cells.max(axis=0) - cells.min(axis=0) + 1) * cell
+        widest = max(widest, float(max(extent)))
+    return widest
+
+
+def is_enclosed(fs, footprint, wall_mask: np.ndarray | None, min_door_m: float = MIN_DOOR_M) -> bool:
+    """True if the room has no wall-ring gap wide enough to enter/exit — i.e. it was scanned with
+    the door closed, so it is a sealed box with only small scan holes. Such rooms have no valid
+    entrance or placement and should be skipped."""
+    return largest_opening_m(fs, footprint, wall_mask) < min_door_m
+
+
+def _merge_scored(points: list[tuple[tuple[float, float], float]], radius: float):
+    """Greedy-merge scored points (((x, z), prob)) closer than `radius`; each cluster becomes its
+    centroid with the best score. Returns clusters sorted by score, strongest first."""
+    merged: list[tuple[tuple[float, float], float]] = []
     used = [False] * len(points)
-    for i, p in enumerate(points):
+    for i, (p, pr) in enumerate(points):
         if used[i]:
             continue
-        cluster = [p]
+        cluster = [(p, pr)]
         used[i] = True
         for j in range(i + 1, len(points)):
-            if not used[j] and np.hypot(points[j][0] - p[0], points[j][1] - p[1]) < radius:
+            q = points[j][0]
+            if not used[j] and np.hypot(q[0] - p[0], q[1] - p[1]) < radius:
                 cluster.append(points[j])
                 used[j] = True
-        arr = np.array(cluster)
-        merged.append((float(arr[:, 0].mean()), float(arr[:, 1].mean())))
+        xs = np.array([c[0][0] for c in cluster])
+        zs = np.array([c[0][1] for c in cluster])
+        merged.append(((float(xs.mean()), float(zs.mean())), max(pr2 for _, pr2 in cluster)))
+    merged.sort(key=lambda m: -m[1])
     return merged
 
 
@@ -139,7 +173,9 @@ class DoorNet(nn.Module):
 class DoorClassifier:
     def __init__(self, weights: Path, device: str | None = None) -> None:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        checkpoint = torch.load(weights, map_location=self.device)
+        # weights_only=False: our own checkpoint stores numpy mean/std, which PyTorch 2.6's default
+        # (weights_only=True) refuses to unpickle. Safe here since we produced the file ourselves.
+        checkpoint = torch.load(weights, map_location=self.device, weights_only=False)
         self.mean = np.asarray(checkpoint["mean"], dtype=np.float32)
         self.std = np.asarray(checkpoint["std"], dtype=np.float32)
         self.net = DoorNet(n_features=len(self.mean)).to(self.device)
@@ -186,12 +222,14 @@ def find_doors(fs, footprint, wall_mask, camera_xz, keep_prob: float = KEEP_PROB
         return placement.detect_entrances(fs, footprint, wall_mask, camera_xz)
 
     probs = model.score([c["features"] for c in candidates])
-    # A real door is where the scanner actually walked in/out (feature index 2 = walked_frac).
-    # Gating on that on top of the learned score cuts false doors on walls no one approached.
-    kept = [c["center_xz"] for c, p in zip(candidates, probs)
-            if p >= keep_prob and c["features"][2] > 0.02]
-    if not kept:  # a room has at least one way in — keep the single best walked-through candidate
-        walked = [(c, p) for c, p in zip(candidates, probs) if c["features"][2] > 0.02] \
-            or list(zip(candidates, probs))
-        kept = [max(walked, key=lambda cp: cp[1])[0]["center_xz"]]
-    return _merge_points(kept, MERGE_RADIUS_M)
+    # A real door is where the scanner actually walked in/out (feature index 2 = walked_frac);
+    # gating on that on top of the score cuts false doors on walls no one approached.
+    scored = [(c["center_xz"], p) for c, p in zip(candidates, probs)
+              if p >= keep_prob and c["features"][2] > 0.02]
+    if not scored:  # a room has at least one way in — fall back to the best walked-through candidate
+        pool = [(c["center_xz"], p) for c, p in zip(candidates, probs) if c["features"][2] > 0.02] \
+            or [(c["center_xz"], p) for c, p in zip(candidates, probs)]
+        scored = [max(pool, key=lambda sp: sp[1])]
+    # keep only the strongest one or two doors after merging — not every perimeter blip
+    merged = _merge_scored(scored, MERGE_RADIUS_M)
+    return [xz for xz, _ in merged[:MAX_DOORS]]

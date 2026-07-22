@@ -217,7 +217,7 @@ class BinVerifierNet(nn.Module):
 class BinVerifier:
     def __init__(self, weights: Path, device: str | None = None) -> None:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        checkpoint = torch.load(weights, map_location=self.device)
+        checkpoint = torch.load(weights, map_location=self.device, weights_only=False)  # our own file
         self.net = BinVerifierNet(extra_dims=checkpoint.get("extra_dims", EXTRA_DIMS)).to(self.device)
         self.net.load_state_dict(checkpoint["state_dict"])
         self.net.eval()

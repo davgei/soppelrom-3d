@@ -256,8 +256,9 @@ class Dashboard:
 
         s = json.loads(stats_path.read_text(encoding="utf-8"))
         inne = "innendørs" if s.get("indoor") else "utendørs/åpent"
+        prefix = "⚠ INNESPERRET (dør lukket i scan) — hoppet over    |  " if s.get("closed_room") else ""
         line = (
-            f"  {s.get('address') or stem}    |    {inne}    "
+            f"  {prefix}{s.get('address') or stem}    |    {inne}    "
             f"|    rom {s['length_m']}×{s['width_m']} m ({s['area_m2']} m²)    "
             f"|    {s['n_existing']} kasser    |    ledig gulv {s['free_area_m2']} m²    "
             f"|    {s['n_candidates']} nye plasser ({s['bin_type']})    "

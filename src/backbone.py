@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 import open3d as o3d
+from scipy.ndimage import binary_fill_holes
 
 UP = np.array([0.0, 1.0, 0.0])
 
@@ -103,14 +104,16 @@ def _footprint(floor_xz: np.ndarray, cell: float = 0.05, min_count: int = 3) -> 
     np.add.at(counts, (cells[:, 1], cells[:, 0]), 1)
     occupied = (counts >= min_count).astype(np.uint8)
 
-    # Opening removes thin streaks (points seen through openings); the largest connected
-    # component is the main contiguous floor, so extremal noise no longer inflates the size.
-    kernel = np.ones((3, 3), np.uint8)
-    occupied = cv2.morphologyEx(occupied, cv2.MORPH_OPEN, kernel)
+    # Close first to bridge gaps where the floor is occluded (objects standing on it), so the room
+    # stays ONE region; then open to drop thin stray streaks. Without the close the largest
+    # connected component can collapse to a narrow strip and the footprint comes out far too thin.
+    occupied = cv2.morphologyEx(occupied, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))  # ~0.35 m
+    occupied = cv2.morphologyEx(occupied, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(occupied, connectivity=8)
     if n_labels > 1:
         largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
         occupied = (labels == largest).astype(np.uint8)
+    occupied = binary_fill_holes(occupied).astype(np.uint8)  # count floor hidden under objects too
 
     rows, cols = np.where(occupied > 0)
     centers = np.stack([cols, rows], axis=1).astype(np.float64) * cell + origin + cell / 2

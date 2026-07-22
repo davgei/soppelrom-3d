@@ -191,8 +191,8 @@ def main() -> None:
                 print(f"epoch {epoch:3d}  loss {float(loss):.3f}")
 
     doors.WEIGHTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"state_dict": best_state, "mean": mean, "std": std, "features": list(FEATURE_NAMES)},
-               doors.WEIGHTS_PATH)
+    torch.save({"state_dict": best_state, "mean": mean.tolist(), "std": std.tolist(),
+                "features": list(FEATURE_NAMES)}, doors.WEIGHTS_PATH)
     print(f"\nsaved door detector -> {doors.WEIGHTS_PATH} (used automatically by the pipeline)")
     if val_samples:
         final = _evaluate(net, xv, yv)

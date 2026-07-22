@@ -37,6 +37,7 @@ class PlacementResult:
     entrances: list[tuple[float, float]]
     bin_type: str
     existing_bins: list[tuple[float, float, float, float, float]]
+    reachable: np.ndarray | None = None  # floor a large bin can be wheeled to an entrance
 
 
 def _to_cells(points_xz: np.ndarray, origin: np.ndarray, cell: float, shape: tuple[int, int]):
@@ -124,6 +125,41 @@ def detect_entrances(
         start = camera_xz[: min(10, len(camera_xz))].mean(axis=0)
         entrances = [(float(start[0]), float(start[1]))]
     return entrances
+
+
+def reachable_from_entrance(
+    fs: FreeSpaceResult,
+    rollable: np.ndarray,
+    entrances: list[tuple[float, float]],
+    passage_width: float,
+    margin: float = 0.05,
+    seed_radius: float = 1.5,
+) -> np.ndarray:
+    """Floor cells a bin `passage_width` wide can actually be WHEELED to from an entrance.
+
+    `rollable` is the free, accessible floor (walls/obstacles already excluded). We keep only the
+    cells whose distance to the nearest blocked cell is >= passage_width/2 (so the bin fits — a
+    corridor at least that wide), then flood-fill from each entrance: a spot counts only if it is
+    in the same connected corridor as a door. This enforces a clear path the WHOLE way, not just
+    room at the exit. With no entrance (e.g. a sealed room) nothing is reachable."""
+    cell, origin = fs.cell, fs.origin
+    reachable = np.zeros(rollable.shape, dtype=bool)
+    if not entrances or not rollable.any():
+        return reachable
+    clearance = distance_transform_edt(rollable) * cell
+    corridor = rollable & (clearance >= passage_width / 2 + margin)
+    if not corridor.any():
+        return reachable
+    labels, _ = label(corridor)
+    ys, xs = np.where(corridor)
+    cx = origin[0] + (xs + 0.5) * cell
+    cz = origin[1] + (ys + 0.5) * cell
+    for ex, ez in entrances:
+        dist = np.hypot(cx - ex, cz - ez)
+        nearest = int(np.argmin(dist))
+        if dist[nearest] <= seed_radius:  # the corridor actually reaches this door
+            reachable |= labels == labels[ys[nearest], xs[nearest]]
+    return reachable
 
 
 def _box_corners(center, wall_dir, inward, along, into) -> np.ndarray:
@@ -265,9 +301,15 @@ def find_placements(
     pull_out_lane: float = 1.0,
     spacing: float = 0.15,
     max_candidates: int = 12,
+    passage_width: float | None = None,
 ) -> PlacementResult:
     """existing_bins: (cx, cz, length, width, yaw_deg) per already-present bin, in the aligned frame.
-    New bins line up NEXT TO them (ranked by proximity) and never sit in their pull-out lane."""
+    New bins line up NEXT TO them (ranked by proximity) and never sit in their pull-out lane.
+
+    passage_width: only keep spots a bin this wide can be wheeled to a door (clear corridor the
+    whole way). Defaults to the placed bin's short side; pass the largest bin's short side to
+    require a path wide enough for the biggest bin in the room. entrance_override=[] (not None)
+    means "no entrances" (e.g. a sealed room) -> nothing is reachable -> no candidates."""
     existing_bins = existing_bins or []
     cell, origin = fs.cell, fs.origin
     free = fs.free.copy()
@@ -295,9 +337,10 @@ def find_placements(
     else:
         accessible = free
     free_acc = free & accessible
+    rollable = free_acc.copy()  # floor a bin can roll over (before placement-only exclusions)
 
     entrances: list[tuple[float, float]] = []
-    if entrance_override:
+    if entrance_override is not None:  # [] means "no entrances" (sealed room); None = auto-detect
         entrances = [(float(x), float(z)) for x, z in entrance_override]
     elif len(camera_xz):
         start = camera_xz[: min(10, len(camera_xz))].mean(axis=0)
@@ -336,6 +379,18 @@ def find_placements(
             existing_bins, spacing, max_candidates,
         )
 
+    # 3) keep only spots the bin can actually be WHEELED to a door (clear path the whole way,
+    #    wide enough for the largest bin), not just spots with room at the exit
+    passage = passage_width if passage_width is not None else min(length, width)
+    reachable = reachable_from_entrance(fs, rollable, entrances, passage)
+
+    def _reachable(center_xz: tuple[float, float]) -> bool:
+        col = int((center_xz[0] - origin[0]) / cell)
+        row = int((center_xz[1] - origin[1]) / cell)
+        return 0 <= row < rows and 0 <= col < cols and bool(reachable[row, col])
+
+    candidates = [c for c in candidates if _reachable(c.center_xz)]
+
     return PlacementResult(
         cell=cell,
         origin=origin,
@@ -346,4 +401,5 @@ def find_placements(
         entrances=entrances,
         bin_type=bin_type,
         existing_bins=existing_bins,
+        reachable=reachable,
     )
