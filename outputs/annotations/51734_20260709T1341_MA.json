@@ -1,0 +1,24 @@
+{
+  "scan": "51734_20260709T1341_MA.zip",
+  "floor_height": -1.3936372816216946,
+  "boxes": [
+    {
+      "center": [
+        -2.0437150906032415,
+        -0.7686372816216946,
+        0.4039505088564701
+      ],
+      "extent": [
+        1.37,
+        1.25,
+        0.78
+      ],
+      "yaw_deg": -90.17196044961192,
+      "bin_type": "4-hjuls container",
+      "status": "forslag",
+      "source": "auto",
+      "n_views": 199,
+      "confidence": 0.89
+    }
+  ]
+}

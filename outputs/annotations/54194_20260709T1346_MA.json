@@ -1,0 +1,42 @@
+{
+  "scan": "54194_20260709T1346_MA.zip",
+  "floor_height": -1.200312318273315,
+  "boxes": [
+    {
+      "center": [
+        0.8998203277587891,
+        -0.5753123182733151,
+        -1.740707278251648
+      ],
+      "extent": [
+        1.37,
+        1.25,
+        0.78
+      ],
+      "yaw_deg": -90.11897929736017,
+      "bin_type": "4-hjuls container",
+      "status": "forslag",
+      "source": "auto",
+      "n_views": 186,
+      "confidence": 0.975
+    },
+    {
+      "center": [
+        1.4015166759490967,
+        -0.5753123182733151,
+        -0.11151045560836792
+      ],
+      "extent": [
+        0.78,
+        1.25,
+        1.37
+      ],
+      "yaw_deg": -179.91704483637085,
+      "bin_type": "4-hjuls container",
+      "status": "forslag",
+      "source": "auto",
+      "n_views": 10,
+      "confidence": 0.851
+    }
+  ]
+}
