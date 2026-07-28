@@ -16,8 +16,16 @@ from scipy.signal import find_peaks
 from .detection import Detection2D
 from .scan_io import Keyframe, ScanArchive
 
-SPLIT_MAX_SINGLE = 1.6      # a cluster longer than this may be several bins in a row
-SPLIT_MIN_SEPARATION = 0.5  # density peaks (bins) must be at least this far apart (m)
+# Splitting a merged run of bins. Bins standing side by side get clustered into ONE blob (their
+# point sets touch well within the merge radius), and the blob then fits no bin type and is thrown
+# away — measured as the main cause of missing proposals. The old limit of 1.6 m never split a PAIR
+# OF DUNKER (~1.2-1.5 m wide together), and a single 4-wheel is 1.37 m, so length alone cannot tell
+# them apart: the density valley between two bins has to make that call, hence the lower start
+# length plus a more sensitive prominence.
+SPLIT_MAX_SINGLE = 0.95      # a cluster longer than this may be several bins in a row
+SPLIT_MIN_SEPARATION = 0.40  # density peaks (bins) must be at least this far apart (m)
+SPLIT_PROMINENCE_FRAC = 0.03  # a peak must stand out this much of the tallest peak
+SPLIT_MIN_VALLEY_DROP = 0.92  # the valley must fall to at most this fraction of the lower peak
 MIN_SEGMENT_POINTS = 30
 
 _ARKIT_FLIP = np.diag([1.0, -1.0, -1.0])
@@ -141,11 +149,21 @@ def _split_masks(points_xz: np.ndarray, bin_width: float = 0.05) -> list[np.ndar
     hist, edges = np.histogram(projection, bins=n_bins, range=(low, high))
     smooth = np.convolve(hist, np.ones(3) / 3, mode="same")
     distance = max(1, int(SPLIT_MIN_SEPARATION / ((high - low) / n_bins)))
-    peaks, _ = find_peaks(smooth, distance=distance, prominence=max(smooth.max() * 0.25, 1.0))
+    peaks, _ = find_peaks(smooth, distance=distance,
+                          prominence=max(smooth.max() * SPLIT_PROMINENCE_FRAC, 1.0))
     if len(peaks) <= 1:
         return None
 
-    cuts = [float(edges[p1 + int(np.argmin(smooth[p1:p2 + 1]))]) for p1, p2 in zip(peaks[:-1], peaks[1:])]
+    # Cut only where the density really falls away between two peaks. Two bins leave a visible
+    # trough at their seam; one bin scanned unevenly has bumps but no deep valley, so this is what
+    # keeps a single bin from being sliced in two.
+    cuts: list[float] = []
+    for p1, p2 in zip(peaks[:-1], peaks[1:]):
+        valley = p1 + int(np.argmin(smooth[p1:p2 + 1]))
+        if smooth[valley] <= SPLIT_MIN_VALLEY_DROP * min(smooth[p1], smooth[p2]):
+            cuts.append(float(edges[valley]))
+    if not cuts:
+        return None
     bounds = [-np.inf, *cuts, np.inf]
     return [(projection >= a) & (projection < b) for a, b in zip(bounds[:-1], bounds[1:])]
 

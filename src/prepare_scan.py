@@ -201,6 +201,86 @@ def refilter(cache_root: Path = CACHE_ROOT, weights: str | None = None) -> None:
           f"rewrote {changed} scan(s)", flush=True)
 
 
+def redetect(
+    cache_root: Path = CACHE_ROOT,
+    weights: str | None = None,
+    conf: float = 0.05,
+    min_views: int = 2,
+    unannotated_first: bool = True,
+) -> None:
+    """Regenerate proposals from the CACHED cloud, without redoing reconstruction.
+
+    The point cloud and Poisson mesh are unchanged by detection/gating tweaks, and rebuilding them
+    is by far the slowest step — so after changing the size gate, the wall-axis straightening or the
+    verifier, this re-runs only the proposal half: YOLO -> back-projection -> gate -> snap+straighten
+    -> verifier -> overlap NMS. Only cache/<scan>/proposals.json is rewritten; your annotations in
+    outputs/annotations/ are never touched."""
+    scans = [p for p in sorted(RAW_DIR.glob("*.zip")) if (cache_root / p.stem / "cloud.ply").exists()]
+    if unannotated_first:  # the scans you are about to annotate get their new boxes first
+        scans.sort(key=lambda p: is_annotated(p))
+    if not scans:
+        print("[redetect] no cached scans found", flush=True)
+        return
+
+    model = detection.load_model(weights)
+    verifier = verify_bins.load_verifier()
+    print(f"[redetect] {len(scans)} scan(s), verifier={'ja' if verifier is not None else 'nei'}", flush=True)
+    total_before = total_after = 0
+
+    for index, zip_path in enumerate(scans, start=1):
+        cache = cache_root / zip_path.stem
+        try:
+            cloud = o3d.io.read_point_cloud(str(cache / "cloud.ply"))
+            cloud_points = np.asarray(cloud.points)
+            floor_height = estimate_floor_height(cloud)
+
+            old = 0
+            if (cache / "proposals.json").exists():
+                _, old_boxes = annotations.load_annotations(cache / "proposals.json")
+                old = len(old_boxes)
+
+            archive = ScanArchive(zip_path)
+            per_frame = detection.detect_scan(archive, model, conf=conf)
+            instances = backproject.merge_detections(
+                archive, per_frame, floor_height=floor_height, min_views=min_views
+            )
+            archive.close()
+
+            boxes: list[annotations.BinBox] = []
+            for inst in instances:
+                verdict = binfit.score_candidate(inst.size, inst.mean_confidence, inst.n_views)
+                if not verdict.keep:
+                    continue
+                y_min = float(inst.center[1] - inst.size[1] / 2)
+                y_max = float(inst.center[1] + inst.size[1] / 2)
+                box = annotations.BinBox.from_min_area_rect(
+                    inst.rect, y_min, y_max, n_views=inst.n_views, confidence=verdict.score
+                )
+                box.bin_type = verdict.bin_type
+                box.status = annotations.STATUS_PROPOSED  # never auto-approved
+                boxes.append(box)
+
+            room_axis = room_axis_deg(cloud_points, floor_height)
+            for box in boxes:
+                annotations.snap_box_to_type(box, floor_height)
+                if room_axis is not None:
+                    annotations.align_box_to_axis(box, room_axis)
+            if verifier is not None and boxes:
+                probs = verifier.score_boxes(boxes, cloud_points, floor_height)
+                boxes = [b for b, p in zip(boxes, probs) if p >= verify_bins.DROP_BELOW]
+            boxes = annotations.remove_overlapping_boxes(boxes)
+
+            annotations.save_annotations(cache / "proposals.json", zip_path.name, floor_height, boxes)
+            total_before += old
+            total_after += len(boxes)
+            print(f"[redetect] {index}/{len(scans)} {zip_path.stem}: {old} -> {len(boxes)} forslag"
+                  f"{' (annotert)' if is_annotated(zip_path) else ''}", flush=True)
+        except Exception as error:  # noqa: BLE001 - keep going, report at the end
+            print(f"[redetect] {index}/{len(scans)} {zip_path.stem}: FEIL {error!r}", flush=True)
+
+    print(f"[redetect] ferdig: {total_before} -> {total_after} forslag totalt", flush=True)
+
+
 def watch(
     max_ready: int,
     weights: str | None = None,
@@ -227,6 +307,9 @@ def main() -> None:
     parser.add_argument("--refilter", action="store_true",
                         help="re-score cached proposals against the current verifier and rewrite the "
                              "cleaned lists (no detection re-run)")
+    parser.add_argument("--redetect", action="store_true",
+                        help="regenerate proposals for all cached scans from the cached cloud (re-runs "
+                             "detection + gate + straightening + verifier, but NOT reconstruction)")
     parser.add_argument("--watch", action="store_true",
                         help="keep a buffer of prepared scans ahead of annotation progress")
     parser.add_argument("--max-ready", type=int, default=5,
@@ -247,6 +330,10 @@ def main() -> None:
 
     if args.refilter:
         refilter(weights=args.weights)
+        return
+
+    if args.redetect:
+        redetect(weights=args.weights, conf=args.conf, min_views=args.min_views)
         return
 
     if args.watch:
