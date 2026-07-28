@@ -916,7 +916,7 @@ class AnnotationApp:
             return
         self._cancel_draw()
         self.mode = MODE_PLACE
-        self._top_down_view()
+        # behold kameravinkelen brukeren står i — plassering skal ikke tvinge topdown
         self.mode_label.text = (
             f"Plasser «{self.type_combo.selected_text}»: klikk på gulvet. Hold R + flytt musa "
             "for å rotere.\nKlikk «Plasser boks av/på» igjen (eller P / ESC) for å avslutte."

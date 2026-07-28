@@ -12,6 +12,8 @@ from pathlib import Path
 import numpy as np
 import open3d as o3d
 
+import cv2
+
 from . import annotations, backproject, binfit, detection, verify_bins
 from .detect_bins3d import estimate_floor_height
 from .reconstruct import ReconstructionConfig, reconstruct
@@ -27,6 +29,23 @@ def is_prepared(zip_path: Path, cache_root: Path = CACHE_ROOT) -> bool:
 
 def is_annotated(zip_path: Path) -> bool:
     return (ANNOTATION_DIR / f"{zip_path.stem}.json").exists()
+
+
+def room_axis_deg(points: np.ndarray, floor_height: float | None,
+                  band: tuple[float, float] = (0.02, 0.35)) -> float | None:
+    """Direction of the room's walls, from the footprint of the points just above the floor.
+
+    Used to straighten bin proposals: a back-projected box inherits the arbitrary angle of the
+    min-area-rect of a partly scanned bin (~37 deg off in practice), while real bins stand parallel
+    to the walls and to each other. Returns degrees, or None when the floor/points are unusable."""
+    if floor_height is None or len(points) == 0:
+        return None
+    above = points[:, 1] - floor_height
+    near_floor = points[(above > band[0]) & (above < band[1])]
+    if len(near_floor) < 200:
+        return None
+    rect = cv2.minAreaRect(near_floor[:, [0, 2]].astype(np.float32))
+    return float(rect[2])
 
 
 def prepare(
@@ -77,9 +96,24 @@ def prepare(
     # PointNet++ verification: look at the actual 3D points in each surviving box and drop the
     # confident non-bins the size gate let through. It only removes proposals, never approves them.
     # No-op when no verifier has been trained yet (models/verifier_latest.pt).
+    cloud_points = np.asarray(cloud.points)
+
+    # 2-/4-wheel bins have a fixed real-world size, so use the exact dimensions instead of the noisy
+    # measured footprint (position is kept), and straighten the box onto the room's wall grid. Done
+    # BEFORE verification on purpose: the verifier was trained on clean, canonical annotated boxes,
+    # so judging a snapped box matches its training distribution and it stops dropping real bins
+    # just because the raw back-projected footprint was sloppy.
+    room_axis = room_axis_deg(cloud_points, floor_height)
+    for box in boxes:
+        annotations.snap_box_to_type(box, floor_height)
+        if room_axis is not None:
+            annotations.align_box_to_axis(box, room_axis)
+
+    # PointNet++ verification: look at the actual 3D points in each surviving box and drop the
+    # confident non-bins the size gate let through. It only removes proposals, never approves them.
+    # No-op when no verifier has been trained yet (models/verifier_latest.pt).
     verifier = verify_bins.load_verifier()
     if verifier is not None and boxes:
-        cloud_points = np.asarray(cloud.points)
         probs = verifier.score_boxes(boxes, cloud_points, floor_height)
         kept: list[annotations.BinBox] = []
         for box, prob in zip(boxes, probs):
@@ -89,11 +123,7 @@ def prepare(
         print(f"[prepare] {zip_path.name}: verifier kept {len(kept)}/{len(boxes)} proposals", flush=True)
         boxes = kept
 
-    # 2-/4-wheel bins have a fixed real-world size, so use the exact dimensions instead of the
-    # noisy measured footprint (position and orientation are kept), then drop overlapping boxes so
-    # a small bin can't end up nested inside a larger one.
-    for box in boxes:
-        annotations.snap_box_to_type(box, floor_height)
+    # finally drop overlaps so a small bin can't end up nested inside a larger one
     boxes = annotations.remove_overlapping_boxes(boxes)
 
     annotations.save_annotations(cache / "proposals.json", zip_path.name, floor_height, boxes)
@@ -134,8 +164,9 @@ def refilter(cache_root: Path = CACHE_ROOT, weights: str | None = None) -> None:
 
         # 2) re-run the verifier against the current model + threshold
         cloud_file = cache / "cloud.ply"
-        if verifier is not None and boxes and cloud_file.exists():
-            cloud_points = np.asarray(o3d.io.read_point_cloud(str(cloud_file)).points)
+        cloud_points = (np.asarray(o3d.io.read_point_cloud(str(cloud_file)).points)
+                        if cloud_file.exists() else None)
+        if verifier is not None and boxes and cloud_points is not None:
             probs = verifier.score_boxes(boxes, cloud_points, floor_height)
             kept: list[annotations.BinBox] = []
             for box, prob in zip(boxes, probs):
@@ -145,9 +176,12 @@ def refilter(cache_root: Path = CACHE_ROOT, weights: str | None = None) -> None:
                 kept.append(box)
             boxes = kept
 
-        # 3) snap to canonical size and drop overlaps
+        # 3) snap to canonical size, straighten onto the room's wall grid, and drop overlaps
+        room_axis = room_axis_deg(cloud_points, floor_height) if cloud_points is not None else None
         for box in boxes:
             annotations.snap_box_to_type(box, floor_height)
+            if room_axis is not None:
+                annotations.align_box_to_axis(box, room_axis)
         before_nms = len(boxes)
         boxes = annotations.remove_overlapping_boxes(boxes)
         d_overlap += before_nms - len(boxes)

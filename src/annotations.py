@@ -102,7 +102,13 @@ FIXED_SIZE_TYPES = tuple(name for name in BIN_TYPES if name != "annet")
 def snap_box_to_type(box: "BinBox", floor_height: float | None) -> None:
     """Resize a box to its bin type's exact dimensions, keeping the footprint centre and yaw and
     re-seating the base on the floor. The canonical length goes on whichever footprint side was
-    already longer, so the orientation is preserved. No-op for 'annet' (size unknown)."""
+    already longer, so the orientation is preserved. No-op for 'annet' (size unknown).
+
+    NB: which side is "longer" comes from the NOISY measured footprint, so on a roughly square
+    measurement it can flip the bin 90 degrees (measured: ~38% of matched proposals). No reliable
+    geometric signal for that choice was found — in the annotations a bin's long side is parallel to
+    the long wall 48% of the time and perpendicular 48%, i.e. a coin flip — so it is left as measured
+    and the user corrects it with Q/E. align_box_to_axis() does fix the (much more visible) skew."""
     if box.bin_type not in FIXED_SIZE_TYPES:
         return
     length, height, width = BIN_TYPES[box.bin_type]
@@ -110,6 +116,30 @@ def snap_box_to_type(box: "BinBox", floor_height: float | None) -> None:
     ex, _, ez = box.extent
     box.extent = [length, height, width] if ex >= ez else [width, height, length]
     box.center[1] = base + height / 2
+
+
+def align_box_to_axis(box: "BinBox", axis_deg: float, max_snap_deg: float = 35.0) -> bool:
+    """Rotate the box onto the room's grid (the wall direction), keeping its centre and size.
+
+    Measured from the user's own annotations: bins inside one room are almost perfectly parallel to
+    each other (median 0.2 deg apart, 90% within 10 deg), and the room's wall axis predicts that
+    shared direction to within ~5 deg (85% within 15 deg). A back-projected proposal, by contrast,
+    is ~37 deg off — the min-area-rect of a partly scanned bin picks an arbitrary angle. Snapping to
+    the wall grid therefore makes proposals both straighter and mutually parallel.
+
+    Only the angle is changed (never which side is long), and only when the needed correction is
+    below max_snap_deg, so a genuinely skewed bin is left alone. Returns True if rotated."""
+    candidates = [axis_deg + k * 90.0 for k in range(-4, 5)]
+
+    def delta(a: float) -> float:
+        return abs(((a - box.yaw_deg + 90.0) % 180.0) - 90.0)
+
+    best = min(candidates, key=delta)
+    if delta(best) > max_snap_deg:
+        return False
+    changed = abs(((best - box.yaw_deg + 90.0) % 180.0) - 90.0) > 1e-6
+    box.yaw_deg = float(best % 360.0)
+    return changed
 
 
 MAX_OVERLAP = 0.15  # two kept boxes may overlap at most this fraction of the smaller footprint

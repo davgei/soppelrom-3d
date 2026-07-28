@@ -15,14 +15,31 @@ from .loader import load_point_cloud
 from .reconstruct import ReconstructionConfig
 
 
-def estimate_floor_height(pcd: o3d.geometry.PointCloud, seed: int = 42) -> float | None:
+def estimate_floor_height(
+    pcd: o3d.geometry.PointCloud, seed: int = 42, max_planes: int = 6, min_frac: float = 0.02
+) -> float | None:
+    """Height of the FLOOR — the LOWEST horizontal plane, not simply the first/largest one.
+
+    Taking the largest plane puts the "floor" on the CEILING in enclosed rooms (there the ceiling is
+    the biggest flat surface, and an occluded floor loses), which then seats every proposed bin up
+    under the roof. Nothing lies below the real floor, so scanning several planes and keeping the
+    lowest horizontal one is the robust rule (same as backbone.analyze)."""
     o3d.utility.random.seed(seed)
-    model, inliers = pcd.segment_plane(0.03, 3, 500)
-    normal = np.asarray(model[:3])
-    normal /= np.linalg.norm(normal)
-    if abs(normal[1]) < 0.85:
-        return None
-    return float(np.median(np.asarray(pcd.points)[inliers, 1]))
+    work = o3d.geometry.PointCloud(pcd)
+    n_total = max(len(pcd.points), 1)
+    heights: list[float] = []
+    for _ in range(max_planes):
+        if len(work.points) < max(1000, int(min_frac * n_total)):
+            break
+        model, inliers = work.segment_plane(0.03, 3, 500)
+        if len(inliers) < min_frac * n_total:
+            break
+        normal = np.asarray(model[:3], dtype=float)
+        normal /= np.linalg.norm(normal) + 1e-12
+        if abs(normal[1]) >= 0.85:
+            heights.append(float(np.median(np.asarray(work.points)[inliers, 1])))
+        work = work.select_by_index(inliers, invert=True)
+    return min(heights) if heights else None
 
 
 def main() -> None:

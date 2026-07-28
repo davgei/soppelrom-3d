@@ -23,7 +23,12 @@ GATE_MIN_VOLUME = 0.30
 VETO_MAX_HEIGHT = 1.85
 
 # Size-fit tolerance bands (relative error): full credit within TOL, 0 at 2*TOL
-TOL_FOOTPRINT = 0.20
+# The measured footprint is only a plausibility check, NOT the final size: every kept proposal is
+# snapped to its type's exact dimensions afterwards (annotations.snap_box_to_type). Back-projected
+# footprints are noisy and bins standing side by side partly merge, so a tight tolerance threw away
+# real bins (measured e.g. 0.87x0.84 where the bin is 0.75x0.60). Precision is recovered by the
+# trained PointNet verifier, which scores real bins ~0.96 — it is the right place to be strict.
+TOL_FOOTPRINT = 0.38
 TOL_HEIGHT = 0.30            # height is the noisiest measured dim (floor estimate + top clip)
 
 # Fusion weights (size dominates because priors are exact and measurement is metric)
@@ -40,7 +45,7 @@ REJECT_MAX_ASPECT = 4.0      # longer+thinner = sliver
 REJECT_MIN_HEIGHT = 0.50     # shorter = floor clutter / debris
 REJECT_MIN_VOLUME = 0.12     # smaller = point-cloud speck
 REJECT_MAX_LENGTH = 2.60     # longer = wall slab (a merged bin PAIR ~2.4 m is still kept for review)
-MIN_TYPE_FIT = 0.35         # a candidate must fit one of the generated types at least this well
+MIN_TYPE_FIT = 0.15         # must fit one generated type at least this well (loose: see TOL_FOOTPRINT)
 
 # Only these types are auto-generated: they have a fixed, well-known size. "molok" and "annet"
 # are deliberately left out — moloks are rare, and "annet" is a catch-all whose loose default size
