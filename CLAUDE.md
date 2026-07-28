@@ -32,7 +32,9 @@ og se på bildet.
   eller sjekkes inn.
 - **I git/GitHub:** `src/`, `models/*.pt`, `outputs/annotations/`, `outputs/entrances/`.
   Vektene (`models/*.pt`) SKAL pushes.
-- I dette workspacet ligger venv i parent-mappa (`..\.venv`), delt med andre prosjekt.
+- Prosjektet ligger på `C:\Users\davge\dev\jobb` — flyttet UT av OneDrive (git-repo i OneDrive gir
+  sync- og fillås-problemer). Venv er selvstendig i `.venv` i repo-roten, med CUDA-torch (cu124) —
+  ikke reinstaller torch fra `requirements.txt` alene, det gir CPU-versjonen og dreper GPU-trening.
 
 ## Ufravikelige regler
 
