@@ -84,9 +84,14 @@ def project_box(
     full_area = (x2 - x1) * (y2 - y1)
     x1c, y1c = max(x1, 0.0), max(y1, 0.0)
     x2c, y2c = min(x2, float(keyframe.rgb_width)), min(y2, float(keyframe.rgb_height))
-    if x2c - x1c < 12 or y2c - y1c < 12:
+    if x2c - x1c < 24 or y2c - y1c < 24:
         return None
-    if (x2c - x1c) * (y2c - y1c) < 0.25 * full_area:
+    # A bin CLIPPED BY THE FRAME EDGE must still be labelled. The old rule required 25% of the
+    # projected box to be inside the frame, which kept the image but deleted the label — teaching the
+    # detector "no bin here" while a bin is plainly visible. Measured: 1566 label-free frames (9.5%)
+    # where the model finds a bin at conf >= 0.25, 452 at >= 0.70. Detectors train fine on truncated
+    # objects, so keep the clipped box whenever a real, usable piece of it is in frame.
+    if (x2c - x1c) * (y2c - y1c) < 0.08 * full_area:
         return None
 
     depth_h, depth_w = depth.shape
@@ -96,11 +101,17 @@ def project_box(
     du2 = min(int(np.ceil(x2c * scale_x)), depth_w)
     dv1 = max(int(y1c * scale_y), 0)
     dv2 = min(int(np.ceil(y2c * scale_y)), depth_h)
+    # Occlusion / see-through test: does the measured depth inside the box actually agree with where
+    # the box is? At the old 0.20 threshold a label survived when 80% of the depth pixels disagreed,
+    # so labels landed on bare walls, lawn and foliage (measured: labels kept in the loss tail had
+    # median depth agreement 0.70 vs 0.98 for a random reference, 32% vs 6% below 0.40). Requiring
+    # majority agreement removes that class. The old code also trusted a box unconditionally when
+    # fewer than 10 depth pixels were valid; require a more meaningful sample before deciding.
     region = depth[dv1:dv2, du1:du2]
     valid = region > 0.1
-    if valid.sum() >= 10:
+    if valid.sum() >= 40:
         in_range = valid & (region >= z.min() - 0.4) & (region <= z.max() + 0.4)
-        if in_range.sum() / valid.sum() < 0.2:
+        if in_range.sum() / valid.sum() < 0.5:
             return None
 
     return x1c, y1c, x2c, y2c
