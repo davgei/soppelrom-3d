@@ -8,6 +8,7 @@ typing zip names in a terminal.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import threading
@@ -28,11 +29,14 @@ VIEWS = [
     ("Plassering (ny kasse)", "placements.png"),
 ]
 
-BG = "#1e2228"
-PANEL = "#282d35"
-ACCENT = "#3d8bfd"
-TEXT = "#e6e9ef"
-MUTED = "#9aa4b2"
+# palette matching the statistics page (statistikk.html dark theme)
+BG = "#0d0d0d"        # page plane
+PANEL = "#1a1a19"     # card surface
+ACCENT = "#3987e5"    # categorical blue
+TEXT = "#f2f1ea"
+MUTED = "#898781"
+GOOD = "#0ca30c"      # status green (annotated)
+BORDER = "#2c2c2a"    # hairline
 
 
 class Dashboard:
@@ -46,6 +50,8 @@ class Dashboard:
         self.view = tk.StringVar(value=VIEWS[0][0])
         self.bin_type = tk.StringVar(value="4-hjuls container")
         self.status = tk.StringVar(value="Klar.")
+        self.search = tk.StringVar(value="")
+        self._addr_cache: dict[str, str | None] = {}
         self._photo: ImageTk.PhotoImage | None = None
         self._pil: Image.Image | None = None
         self._busy = False
@@ -54,14 +60,17 @@ class Dashboard:
         self._build_layout()
         self._populate()
         self._signature = self._file_signature()
-        self.root.bind("<Left>", lambda _e: self._step(-1))
-        self.root.bind("<Right>", lambda _e: self._step(1))
-        # keyboard shortcuts for the most-used actions (letters shown in the button labels)
-        self.root.bind("<g>", lambda _e: self._generate([self._selected()]))  # Generer bilder
-        self.root.bind("<G>", lambda _e: self._generate_all())                # Shift+G = Generer alle
-        self.root.bind("<o>", lambda _e: self._open_3d())                     # Åpne i 3D
-        self.root.bind("<a>", lambda _e: self._annotate())                    # Annotér
-        self.root.bind("<f>", lambda _e: self._prepare())                     # Forbered
+        # keyboard shortcuts for the most-used actions (letters shown in the button labels); each is
+        # ignored while a text field (the address search) has focus, so typing never triggers them
+        self.root.bind("<Left>", self._hotkey(lambda: self._step(-1)))
+        self.root.bind("<Right>", self._hotkey(lambda: self._step(1)))
+        self.root.bind("<g>", self._hotkey(lambda: self._generate([self._selected()])))
+        self.root.bind("<G>", self._hotkey(self._generate_all))
+        self.root.bind("<o>", self._hotkey(self._open_3d))
+        self.root.bind("<a>", self._hotkey(self._annotate))
+        self.root.bind("<f>", self._hotkey(self._prepare))
+        self.root.bind("<r>", self._hotkey(self._open_reconstruction))
+        self.root.bind("<s>", self._hotkey(self._open_stats))
         # refresh scan statuses the moment the dashboard regains focus (e.g. back from annotating)
         self.root.bind("<FocusIn>", lambda _e: self._refresh_if_changed())
 
@@ -77,17 +86,25 @@ class Dashboard:
         style.configure("TFrame", background=BG)
         style.configure("Panel.TFrame", background=PANEL)
         style.configure("TLabel", background=BG, foreground=TEXT, font=("Segoe UI", 10))
-        style.configure("Header.TLabel", background=BG, foreground=TEXT, font=("Segoe UI Semibold", 16))
+        style.configure("Header.TLabel", background=BG, foreground=TEXT, font=("Segoe UI Semibold", 18))
+        style.configure("Sub.TLabel", background=BG, foreground=MUTED, font=("Segoe UI", 10))
         style.configure("Muted.TLabel", background=PANEL, foreground=MUTED, font=("Segoe UI", 9))
-        style.configure("Stats.TLabel", background=PANEL, foreground=TEXT, font=("Consolas", 10))
-        style.configure("TButton", font=("Segoe UI", 10), padding=6)
-        style.configure("Accent.TButton", font=("Segoe UI Semibold", 10), padding=7)
-        style.map("Accent.TButton", background=[("!disabled", ACCENT)], foreground=[("!disabled", "#ffffff")])
+        style.configure("Stats.TLabel", background=PANEL, foreground=TEXT, font=("Segoe UI", 10), padding=8)
+        style.configure("TButton", font=("Segoe UI", 10), padding=(10, 7), background=PANEL,
+                        foreground=TEXT, borderwidth=0, focuscolor=PANEL)
+        style.map("TButton", background=[("active", BORDER), ("!disabled", PANEL)])
+        style.configure("Accent.TButton", font=("Segoe UI Semibold", 10), padding=(12, 7), borderwidth=0)
+        style.map("Accent.TButton", background=[("active", "#4a94ea"), ("!disabled", ACCENT)],
+                  foreground=[("!disabled", "#ffffff")])
         style.configure("Treeview", background=PANEL, fieldbackground=PANEL, foreground=TEXT,
-                        rowheight=26, font=("Segoe UI", 10))
-        style.configure("Treeview.Heading", font=("Segoe UI Semibold", 10))
+                        rowheight=30, font=("Segoe UI", 10), borderwidth=0)
+        style.configure("Treeview.Heading", font=("Segoe UI Semibold", 10), background=PANEL,
+                        foreground=MUTED, borderwidth=0)
         style.map("Treeview", background=[("selected", ACCENT)], foreground=[("selected", "#ffffff")])
+        style.configure("TSeparator", background=BORDER)
         style.configure("TRadiobutton", background=BG, foreground=TEXT, font=("Segoe UI", 10))
+        style.configure("TEntry", fieldbackground=PANEL, foreground=TEXT, insertcolor=TEXT,
+                        bordercolor=PANEL)
         style.configure("TCombobox", fieldbackground=PANEL, background=PANEL,
                         foreground=TEXT, arrowcolor=TEXT)
         # A readonly Combobox ignores the plain configure above; without an explicit state map
@@ -111,9 +128,10 @@ class Dashboard:
 
     def _build_layout(self) -> None:
         header = ttk.Frame(self.root)
-        header.pack(fill="x", padx=14, pady=(12, 6))
+        header.pack(fill="x", padx=18, pady=(14, 8))
         ttk.Label(header, text="Søppelrom 3D", style="Header.TLabel").pack(side="left")
-        ttk.Label(header, text="  velg skann · se resultat · åpne i 3D", style="TLabel").pack(side="left", padx=8)
+        ttk.Label(header, text="  velg skann · se resultat · åpne i 3D", style="Sub.TLabel").pack(
+            side="left", padx=10, pady=(6, 0))
 
         body = ttk.Frame(self.root)
         body.pack(fill="both", expand=True, padx=14, pady=6)
@@ -121,15 +139,18 @@ class Dashboard:
         # left: scan list
         left = ttk.Frame(body, style="Panel.TFrame")
         left.pack(side="left", fill="y")
-        ttk.Label(left, text="Skann", style="Muted.TLabel").pack(anchor="w", padx=10, pady=(10, 2))
-        self.tree = ttk.Treeview(left, columns=("status", "bins"), show="tree headings", height=26, selectmode="browse")
-        self.tree.heading("#0", text="Navn")
+        ttk.Label(left, text="Søk adresse", style="Muted.TLabel").pack(anchor="w", padx=10, pady=(10, 2))
+        search_entry = ttk.Entry(left, textvariable=self.search)
+        search_entry.pack(fill="x", padx=10, pady=(0, 8))
+        search_entry.bind("<KeyRelease>", lambda _e: self._populate())
+        self.tree = ttk.Treeview(left, columns=("status", "bins"), show="tree headings", height=24, selectmode="browse")
+        self.tree.heading("#0", text="Adresse")
         self.tree.heading("status", text="Status")
         self.tree.heading("bins", text="Kasser")
-        self.tree.column("#0", width=230)
+        self.tree.column("#0", width=300)
         self.tree.column("status", width=90, anchor="center")
         self.tree.column("bins", width=60, anchor="center")
-        self.tree.tag_configure("annotated", foreground="#4ade80")
+        self.tree.tag_configure("annotated", foreground=GOOD)
         self.tree.tag_configure("prepared", foreground=TEXT)
         self.tree.tag_configure("raw", foreground=MUTED)
         self.tree.pack(fill="y", expand=False, padx=10, pady=(0, 10))
@@ -175,9 +196,13 @@ class Dashboard:
         ttk.Button(actions, text="Generer alle (⇧G)", command=self._generate_all).pack(side="left", padx=4)
         separator()
         ttk.Button(actions, text="Åpne i 3D — plassering (O)", command=self._open_3d).pack(side="left", padx=4)
+        ttk.Button(actions, text="3D-rekonstruksjon (R)", command=self._open_reconstruction).pack(side="left", padx=4)
         ttk.Button(actions, text="Annotér (A)", command=self._annotate).pack(side="left", padx=4)
         ttk.Button(actions, text="Forbered: bygg 3D + finn kasser (F)",
                    command=self._prepare).pack(side="left", padx=4)
+        separator()
+        ttk.Button(actions, text="Statistikk (S)", style="Accent.TButton",
+                   command=self._open_stats).pack(side="left", padx=4)
 
         statusbar = ttk.Frame(self.root, style="Panel.TFrame")
         statusbar.pack(fill="x", side="bottom")
@@ -185,9 +210,27 @@ class Dashboard:
 
     # ---------- scan list ----------
 
+    def _address(self, stem: str) -> str | None:
+        """Cached address for a scan (from its stats.json); None if the scan has no rendered stats."""
+        if stem not in self._addr_cache:
+            path = pipeline.preview_dir(stem) / "stats.json"
+            address = None
+            if path.exists():
+                try:
+                    address = json.loads(path.read_text(encoding="utf-8")).get("address")
+                except Exception:  # noqa: BLE001 - a bad stats file just falls back to the scan id
+                    address = None
+            self._addr_cache[stem] = address
+        return self._addr_cache[stem]
+
     def _populate(self) -> None:
+        query = self.search.get().strip().lower()
         self.tree.delete(*self.tree.get_children())
         for stem in pipeline.list_scans():
+            address = self._address(stem)
+            label = address or stem
+            if query and query not in label.lower() and query not in stem.lower():
+                continue
             if pipeline.is_annotated(stem):
                 status, tag = "✓ annotert", "annotated"
             elif pipeline.is_prepared(stem):
@@ -195,7 +238,7 @@ class Dashboard:
             else:
                 status, tag = "rå", "raw"
             bins = pipeline.existing_bin_count(stem) if pipeline.is_prepared(stem) else ""
-            self.tree.insert("", "end", iid=stem, text=stem, values=(status, bins), tags=(tag,))
+            self.tree.insert("", "end", iid=stem, text=label, values=(status, bins), tags=(tag,))
         children = self.tree.get_children()
         if children:
             self.tree.selection_set(children[0])
@@ -204,6 +247,15 @@ class Dashboard:
     def _selected(self) -> str | None:
         sel = self.tree.selection()
         return sel[0] if sel else None
+
+    def _editing(self) -> bool:
+        return isinstance(self.root.focus_get(), tk.Entry)
+
+    def _hotkey(self, action):
+        def handler(_event=None):
+            if not self._editing():
+                action()
+        return handler
 
     def _step(self, delta: int) -> None:
         children = list(self.tree.get_children())
@@ -300,6 +352,7 @@ class Dashboard:
 
     def _generate_done(self) -> None:
         self._busy = False
+        self._addr_cache.clear()  # new stats.json files may have fresh addresses
         self._populate_keep_selection()
         self._on_select()
         self._set_status("Ferdig.")
@@ -331,6 +384,27 @@ class Dashboard:
             self._launch("src.place3d", "--scan", stem, "--bin-type", self.bin_type.get())
             self._set_status("Åpner 3D-visning (plassering + skyve-sti) — bla med pil venstre/høyre …")
 
+    def _open_reconstruction(self) -> None:
+        stem = self._selected()
+        if stem:
+            self._launch("src.reconstruct3d", "--scan", stem, "--bin-type", self.bin_type.get())
+            self._set_status("Åpner 3D-rekonstruksjon (dukkehus) — gulv, vegger, tak, dører/vinduer, kasser …")
+
+    def _open_stats(self) -> None:
+        self._set_status("Genererer statistikk …")
+
+        def work() -> None:
+            try:
+                from . import stats_report
+                path = stats_report.build()
+                import webbrowser
+                webbrowser.open(Path(path).as_uri())
+                self._set_status(f"Åpnet statistikk i nettleseren: {path}")
+            except Exception as error:  # noqa: BLE001 - surface any failure in the status bar
+                self._set_status(f"Feil ved statistikk: {error}")
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _annotate(self) -> None:
         stem = self._selected()
         if stem:
@@ -359,6 +433,7 @@ class Dashboard:
             changed = [stem for stem, value in signature.items() if self._signature.get(stem) != value]
             if changed:
                 self._signature = signature
+                self._addr_cache.clear()
                 self._populate_keep_selection()
                 selected = self._selected()
                 if selected in changed and not self._busy:
