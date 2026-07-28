@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import open3d as o3d
 
-from . import backbone, doors, freespace, placement, render, set_entrance
+from . import backbone, doors, freespace, placement, render, set_entrance, style
 from .annotations import BIN_TYPES, load_annotations
 from .loader import load_point_cloud
 from .reconstruct import ReconstructionConfig
@@ -164,9 +164,18 @@ def analyze_and_render(stem: str, bin_type: str) -> dict:
     scene = compute_scene(stem, bin_type)
     out = preview_dir(stem)
     out.mkdir(parents=True, exist_ok=True)
-    render.annotated_topdown(scene.scene_vis, scene.footprint, out / "room_topdown.png")
-    render.freespace_over_scene(scene.scene_vis, scene.fs, out / "freespace_over_scene.png")
-    render.placements_over_scene(scene.scene_vis, scene.result, out / "placements.png")
+    # the address is the heading on every sheet; the scan id stays as a small note for traceability
+    title = scene.address or stem
+    render.annotated_topdown(scene.scene_vis, scene.footprint, out / "room_topdown.png",
+                             title=title, note=stem)
+    render.freespace_over_scene(scene.scene_vis, scene.fs, out / "freespace_over_scene.png",
+                                title=title, note=stem)
+    render.placements_over_scene(
+        scene.scene_vis, scene.result, out / "placements.png", title=title, note=stem,
+        lines=[f"Ledig gulv: {style.fmt_m2(scene.fs.free_area_m2)}"],
+    )
+    render.before_after(scene.scene_vis, scene.result, out / "before_after.png",
+                        title=title, note=stem)
 
     stats = {
         "scan": stem,

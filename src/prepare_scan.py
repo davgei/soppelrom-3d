@@ -6,6 +6,7 @@ sequentially, so the next scan is ready while the user annotates the current one
 from __future__ import annotations
 
 import argparse
+import math
 import time
 from pathlib import Path
 
@@ -31,21 +32,89 @@ def is_annotated(zip_path: Path) -> bool:
     return (ANNOTATION_DIR / f"{zip_path.stem}.json").exists()
 
 
-def room_axis_deg(points: np.ndarray, floor_height: float | None,
-                  band: tuple[float, float] = (0.02, 0.35)) -> float | None:
-    """Direction of the room's walls, from the footprint of the points just above the floor.
+AXIS_BAND = (1.00, 2.20)   # height above floor of the WALL band the axis is measured from
+AXIS_CELL = 0.05           # raster resolution, metres
+AXIS_BIN_DEG = 1.0         # orientation-histogram bin width
+AXIS_SMOOTH_DEG = 4.0      # circular smoothing sigma over that histogram
 
-    Used to straighten bin proposals: a back-projected box inherits the arbitrary angle of the
-    min-area-rect of a partly scanned bin (~37 deg off in practice), while real bins stand parallel
-    to the walls and to each other. Returns degrees, or None when the floor/points are unusable."""
+
+def _orientation_histogram(img: np.ndarray, blur_sigma_cells: float) -> np.ndarray:
+    """Gradient-orientation histogram (mod 90 deg) of a density raster, weighted by edge strength.
+
+    sqrt-compression keeps a densely scanned patch of wall from outvoting the rest, and Scharr is
+    the most accurate 3x3 gradient available."""
+    work = np.ascontiguousarray(np.sqrt(img), dtype=np.float32)
+    if blur_sigma_cells > 0:
+        k = int(2 * round(3 * blur_sigma_cells) + 1)
+        work = cv2.GaussianBlur(work, (k, k), blur_sigma_cells, borderType=cv2.BORDER_REPLICATE)
+    gx = cv2.Scharr(work, cv2.CV_32F, 1, 0)
+    gz = cv2.Scharr(work, cv2.CV_32F, 0, 1)
+    mag = np.sqrt(gx * gx + gz * gz).ravel()
+    n_bins = int(round(90.0 / AXIS_BIN_DEG))
+    sel = mag > 1e-9
+    if not sel.any():
+        return np.zeros(n_bins)
+    ang = np.degrees(np.arctan2(gz.ravel()[sel], gx.ravel()[sel])) % 90.0
+    idx = np.clip((ang / 90.0 * n_bins).astype(np.int32), 0, n_bins - 1)
+    hist = np.zeros(n_bins)
+    np.add.at(hist, idx, mag[sel].astype(np.float64))
+    return hist
+
+
+def _circular_smooth(hist: np.ndarray, sigma_bins: float) -> np.ndarray:
+    """Smooth a wrap-around histogram (0 and 90 deg are the same direction)."""
+    if sigma_bins <= 0:
+        return hist
+    radius = max(1, int(round(3 * sigma_bins)))
+    t = np.arange(-radius, radius + 1, dtype=np.float64)
+    kernel = np.exp(-0.5 * (t / sigma_bins) ** 2)
+    kernel /= kernel.sum()
+    padded = np.concatenate([hist[-radius:], hist, hist[:radius]])
+    return np.convolve(padded, kernel, mode="valid")
+
+
+def room_axis_deg(points: np.ndarray, floor_height: float | None,
+                  band: tuple[float, float] = AXIS_BAND) -> float | None:
+    """Direction of the room's walls, used to straighten bin proposals.
+
+    A back-projected box inherits the arbitrary angle of the min-area-rect of a partly scanned bin
+    (~37 deg off in practice), while real bins stand parallel to the walls and to each other.
+
+    This measures the walls by letting EVERY wall pixel vote: rasterise the wall band, then take the
+    peak of an edge-strength-weighted histogram of gradient orientations (mod 90 deg), refined by
+    parabolic interpolation. The previous version took cv2.minAreaRect of the near-floor points,
+    which is decided by ~4 extreme points, so one diagonal wall or a protruding object rotated the
+    whole grid. Measured against the annotated bins (86 scenes / 360 bins): median error 6.50 -> 2.49
+    deg, within 10 deg 64% -> 88%; the worst cases were exactly the large irregular yards
+    (e.g. 43.1 -> 1.2 deg). Six candidate estimators were compared and an independent check
+    reproduced this one from scratch; per-bin LOCAL variants were no better than this global fit,
+    so the simpler global one is used. Returns degrees, or None when there is no usable wall signal."""
     if floor_height is None or len(points) == 0:
         return None
     above = points[:, 1] - floor_height
-    near_floor = points[(above > band[0]) & (above < band[1])]
-    if len(near_floor) < 200:
+    wall = points[(above > band[0]) & (above < band[1])]
+    if len(wall) < 200:
         return None
-    rect = cv2.minAreaRect(near_floor[:, [0, 2]].astype(np.float32))
-    return float(rect[2])
+    x, z = wall[:, 0].astype(np.float32), wall[:, 2].astype(np.float32)
+    x0, z0 = float(x.min()), float(z.min())
+    nx = int(math.floor((float(x.max()) - x0) / AXIS_CELL)) + 1
+    nz = int(math.floor((float(z.max()) - z0) / AXIS_CELL)) + 1
+    if nx < 8 or nz < 8 or nx * nz > 40_000_000:
+        return None
+    ix = np.clip(((x - x0) / AXIS_CELL).astype(np.int64), 0, nx - 1)
+    iz = np.clip(((z - z0) / AXIS_CELL).astype(np.int64), 0, nz - 1)
+    img = np.zeros(nz * nx, dtype=np.float32)
+    np.add.at(img, iz * nx + ix, 1.0)          # rows = Z, cols = X -> gradients are (d/dx, d/dz)
+    hist = _orientation_histogram(img.reshape(nz, nx), 0.075 / AXIS_CELL)
+    if hist.sum() <= 0:
+        return None
+    hist = _circular_smooth(hist, AXIS_SMOOTH_DEG / AXIS_BIN_DEG)
+    n = len(hist)                               # parabolic refinement of the peak
+    i = int(np.argmax(hist))
+    y0, y1, y2 = hist[(i - 1) % n], hist[i], hist[(i + 1) % n]
+    denom = y0 - 2 * y1 + y2
+    delta = 0.0 if abs(denom) < 1e-12 else 0.5 * (y0 - y2) / denom
+    return float((i + np.clip(delta, -0.5, 0.5)) * AXIS_BIN_DEG)
 
 
 def prepare(

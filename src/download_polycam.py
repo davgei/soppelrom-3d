@@ -60,10 +60,17 @@ def _load_ledger() -> set[str]:
     return set()
 
 
-def _record_ledger(capture_id: str) -> None:
+def _ledger_key(capture_id: str, fmt: str) -> str:
+    """Ledger entries are per capture AND per format, so a capture already fetched as the raw
+    keyframe archive can still be fetched as e.g. PLY. Bare ids from before this change are treated
+    as the historical 'Images' downloads, which keeps the existing ledger valid."""
+    return capture_id if fmt.lower() == "images" else f"{capture_id}:{fmt.lower()}"
+
+
+def _record_ledger(capture_id: str, fmt: str = "Images") -> None:
     LEDGER.parent.mkdir(parents=True, exist_ok=True)
     with open(LEDGER, "a", encoding="utf-8") as handle:
-        handle.write(capture_id + "\n")
+        handle.write(_ledger_key(capture_id, fmt) + "\n")
 
 
 # The real 'images' export is a normal browser download (opens a popup). We don't catch it as a
@@ -395,8 +402,12 @@ def export_capture(page: Page, context: BrowserContext, url: str, fmt: str) -> b
         print(f"  ingen nedlasting startet: {str(error).splitlines()[0]}")
         return False
 
+    # Keep the real extension. Forcing ".zip" on every download was fine while we only fetched the
+    # raw keyframe archive, but it would save a PLY export as "<name>.ply.zip" — an unopenable file
+    # with a misleading name. A sibling "<same stem>.ply" next to the zip is exactly what
+    # loader.resolve_ply() looks for, and list_scans() only globs *.zip, so it adds no phantom scans.
     name = download.suggested_filename or f"{url.rstrip('/').split('/')[-1]}.zip"
-    if not name.lower().endswith(".zip"):
+    if not Path(name).suffix:
         name = f"{name}.zip"
     target = RAW_DIR / name
     if target.exists():
@@ -470,7 +481,7 @@ def run_auto(context: BrowserContext, url: str, limit: int, fmt: str) -> None:
     stop_after = (limit + 10) if limit <= 50 else None
     urls = collect_capture_urls(page, stop_after=stop_after)
     ledger = _load_ledger()
-    todo = [u for u in urls if u.rstrip("/").split("/")[-1] not in ledger]
+    todo = [u for u in urls if _ledger_key(u.rstrip("/").split("/")[-1], fmt) not in ledger]
     print(f"\nfant {len(urls)} captures, {len(urls) - len(todo)} allerede lastet ned "
           f"(hopper over), laster ned '{fmt}'")
 
@@ -480,7 +491,7 @@ def run_auto(context: BrowserContext, url: str, limit: int, fmt: str) -> None:
         print(f"\n[{index}/{min(len(todo), limit)}] {capture_url}", flush=True)
         try:
             if export_capture(page, context, capture_url, fmt):
-                _record_ledger(capture_id)
+                _record_ledger(capture_id, fmt)
                 done += 1
             else:
                 failed.append(capture_url)

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import math
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
@@ -22,7 +23,7 @@ import numpy as np  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.patches import Patch, Polygon, Rectangle  # noqa: E402
 
-from . import pipeline  # noqa: E402
+from . import pipeline, style  # noqa: E402
 from .annotations import BIN_TYPES, load_annotations  # noqa: E402
 from .paths import ANNOTATION_DIR, CACHE_ROOT, PREVIEW_ROOT  # noqa: E402
 
@@ -37,6 +38,13 @@ _PROPOSED_EDGE = "#2e7d32"
 _ENTRANCE = "#e0219a"
 _WALL = "#2b2b2b"
 _FLOOR = "#f6f5f1"
+
+# Breathing room around the drawing, in metres. An annotated bin can stick out past the measured
+# footprint, so the frame is fitted to EVERYTHING drawn instead of to the room rectangle: otherwise
+# such a bin is clipped by the axes and crosses the dimension line.
+DIM_OFFSET = 0.6        # dimension line, this far outside the drawn geometry
+DIM_LABEL_SPACE = 0.7   # room for the measurement text below / left of that line
+PLAN_PAD = 0.7          # air on the far sides; the 1 m scale bar lives in the top strip
 
 
 def _room_frame(footprint) -> tuple[np.ndarray, np.ndarray, float, float]:
@@ -123,38 +131,86 @@ def _draw_entrance(ax, point: tuple[float, float], length: float, width: float) 
             bbox=dict(boxstyle="round,pad=0.15", facecolor="white", edgecolor="none", alpha=0.75))
 
 
-def render_floorplan(scene, out_png: Path) -> Path:
-    """Draw the floor plan for one computed Scene; writes <out>.png and <out>.pdf. Returns the PNG."""
-    footprint = scene.footprint
-    rotation, origin, length, width = _room_frame(footprint)
+@dataclass
+class PlanInfo:
+    """What the plan shows, derivable without drawing it, so a caller can lay out a page (and
+    caption the plan) before any axes exists."""
+    length_m: float
+    width_m: float
+    xlim: tuple[float, float]                         # full drawing extent, room-frame metres
+    ylim: tuple[float, float]
+    existing: list = field(default_factory=list)      # (x, z, length, width, yaw, bin_type)
+    present_types: list[str] = field(default_factory=list)
+    n_candidates: int = 0
+
+    @property
+    def span_x(self) -> float:
+        return self.xlim[1] - self.xlim[0]
+
+    @property
+    def span_y(self) -> float:
+        return self.ylim[1] - self.ylim[0]
+
+    @property
+    def dim_x(self) -> float:
+        """X of the vertical dimension line (and Y of the horizontal one, via dim_y)."""
+        return self.xlim[0] + DIM_LABEL_SPACE
+
+    @property
+    def dim_y(self) -> float:
+        return self.ylim[0] + DIM_LABEL_SPACE
+
+
+def plan_info(scene) -> PlanInfo:
+    """Measure the plan without drawing it: room size, drawing extent, the typed existing bins and
+    which bin types will need a legend entry."""
+    rotation, origin, length, width = _room_frame(scene.footprint)
     existing = _existing_bins_typed(scene.stem, scene.rotation)
+    present: list[str] = []
+    for *_, bin_type in existing:
+        if bin_type not in present:
+            present.append(bin_type)
+
+    drawn = [np.array([[0.0, 0.0], [length, width]])]
+    drawn += [_to_room(_bin_corners(bx, bz, bl, bw, byaw), rotation, origin)
+              for bx, bz, bl, bw, byaw, _ in existing]
+    drawn += [_to_room(cv2.boxPoints(cand.rect), rotation, origin)
+              for cand in scene.result.candidates]
+    points = np.vstack(drawn)
+    low = points.min(axis=0) - (DIM_OFFSET + DIM_LABEL_SPACE)
+    high = points.max(axis=0) + PLAN_PAD
+    return PlanInfo(length, width, (float(low[0]), float(high[0])), (float(low[1]), float(high[1])),
+                    existing, present, len(scene.result.candidates))
+
+
+def legend_handles(present_types: list[str]) -> list:
+    """Tegnforklaring entries for the plan: the bin types actually drawn, plus proposal + entrance."""
+    handles: list = [Patch(facecolor=_BIN_STYLE.get(t, _BIN_STYLE["annet"])[0],
+                           edgecolor="#16232e", label=t) for t in present_types]
+    handles.append(Patch(facecolor=_PROPOSED_FACE, edgecolor=_PROPOSED_EDGE, label="Forslag (ny kasse)"))
+    handles.append(Line2D([0], [0], marker="o", color="none", markerfacecolor=_ENTRANCE,
+                          markersize=10, label="Inngang"))
+    return handles
+
+
+def draw_plan(ax, scene, *, info: PlanInfo | None = None, scale_bar: bool = True) -> PlanInfo:
+    """Draw the CAD plan (walls, existing bins by type, numbered proposals, entrances, dimension
+    lines) onto `ax`. Shared by the standalone plan sheet and the A4 report page. Pass `info` to
+    reuse a measurement already taken by plan_info()."""
+    info = info or plan_info(scene)
+    rotation, origin, _, _ = _room_frame(scene.footprint)
+    length, width, existing = info.length_m, info.width_m, info.existing
     candidates = scene.result.candidates
 
-    margin_l = margin_b = 1.3
-    margin_r = margin_t = 0.7
-    span_x, span_y = length + margin_l + margin_r, width + margin_b + margin_t
-    fig_w = 11.0
-    fig = plt.figure(figsize=(fig_w, fig_w * span_y / span_x + 1.9), dpi=150)
-    grid = fig.add_gridspec(2, 1, height_ratios=[span_y, 1.7], hspace=0.08)
-    ax = fig.add_subplot(grid[0])
-    bottom = grid[1].subgridspec(1, 2, width_ratios=[2.5, 1.0], wspace=0.02)
-    info = fig.add_subplot(bottom[0])
-    legend_ax = fig.add_subplot(bottom[1])
-    for panel in (info, legend_ax):
-        panel.axis("off")
-        panel.set_xlim(0, 1)
-        panel.set_ylim(0, 1)
-
     ax.set_aspect("equal")
-    ax.set_xlim(-margin_l, length + margin_r)
-    ax.set_ylim(-margin_b, width + margin_t)
+    ax.set_xlim(*info.xlim)
+    ax.set_ylim(*info.ylim)
     ax.axis("off")
 
     ax.add_patch(Rectangle((0, 0), length, width, facecolor=_FLOOR, edgecolor="none", zorder=0))
     ax.add_patch(Rectangle((0, 0), length, width, fill=False, edgecolor=_WALL, linewidth=3.2,
                            joinstyle="miter", zorder=2))
 
-    present_types: list[str] = []
     for bx, bz, bl, bw, byaw, bin_type in existing:
         corners = _to_room(_bin_corners(bx, bz, bl, bw, byaw), rotation, origin)
         face, short = _BIN_STYLE.get(bin_type, _BIN_STYLE["annet"])
@@ -163,8 +219,6 @@ def render_floorplan(scene, out_png: Path) -> Path:
         cx, cy = corners.mean(axis=0)
         ax.text(cx, cy, short, ha="center", va="center", fontsize=7.5, color="white",
                 fontweight="bold", zorder=4)
-        if bin_type not in present_types:
-            present_types.append(bin_type)
 
     for index, cand in enumerate(candidates, start=1):
         corners = _to_room(cv2.boxPoints(cand.rect), rotation, origin)
@@ -178,31 +232,53 @@ def render_floorplan(scene, out_png: Path) -> Path:
         point = _to_room(np.array([entrance]), rotation, origin)[0]
         _draw_entrance(ax, (float(point[0]), float(point[1])), length, width)
 
-    _dimension(ax, (0.0, -0.6), (length, -0.6), f"{length:.2f} m", vertical=False)
-    _dimension(ax, (-0.6, 0.0), (-0.6, width), f"{width:.2f} m", vertical=True)
+    # Norwegian decimal comma via style, so the plan and the report sheet never disagree on a number
+    _dimension(ax, (0.0, info.dim_y), (length, info.dim_y), style.fmt_m(length), vertical=False)
+    _dimension(ax, (info.dim_x, 0.0), (info.dim_x, width), style.fmt_m(width), vertical=True)
 
-    bar_x, bar_y = 0.0, width + 0.32
-    ax.plot([bar_x, bar_x + 1.0], [bar_y, bar_y], color=_WALL, lw=3, solid_capstyle="butt")
-    ax.text(bar_x + 0.5, bar_y + 0.08, "1 m", ha="center", va="bottom", fontsize=8, color=_WALL)
+    if scale_bar:
+        bar_x, bar_y = 0.0, info.ylim[1] - 0.38   # top strip: always clear of the drawing
+        ax.plot([bar_x, bar_x + 1.0], [bar_y, bar_y], color=_WALL, lw=3, solid_capstyle="butt")
+        ax.text(bar_x + 0.5, bar_y + 0.08, "1 m", ha="center", va="bottom", fontsize=8, color=_WALL)
+
+    return info
+
+
+def render_floorplan(scene, out_png: Path) -> Path:
+    """Draw the floor plan for one computed Scene; writes <out>.png and <out>.pdf. Returns the PNG."""
+    footprint = scene.footprint
+    measured = plan_info(scene)
+    fig_w = 11.0
+    fig = plt.figure(figsize=(fig_w, fig_w * measured.span_y / measured.span_x + 1.9), dpi=150)
+    grid = fig.add_gridspec(2, 1, height_ratios=[measured.span_y, 1.7], hspace=0.08)
+    ax = fig.add_subplot(grid[0])
+    bottom = grid[1].subgridspec(1, 2, width_ratios=[2.5, 1.0], wspace=0.02)
+    info = fig.add_subplot(bottom[0])
+    legend_ax = fig.add_subplot(bottom[1])
+    for panel in (info, legend_ax):
+        panel.axis("off")
+        panel.set_xlim(0, 1)
+        panel.set_ylim(0, 1)
+
+    plan = draw_plan(ax, scene, info=measured)
+    length, width, existing, candidates = plan.length_m, plan.width_m, plan.existing, plan.n_candidates
 
     title = scene.address or scene.stem
     indoor = "Innendørs" if scene.geometry.is_indoor else "Utendørs"
     info.text(0.0, 0.9, title, fontsize=15, fontweight="bold", va="center")
     info.text(0.0, 0.58,
-              f"Mål: {length:.2f} × {width:.2f} m      Areal: {footprint.area_m2:.1f} m²      {indoor}",
+              f"Mål: {style.num(length, 2)} × {style.fmt_m(width)}      "
+              f"Areal: {style.fmt_m2(footprint.area_m2)}      {indoor}",
               fontsize=10.5, va="center")
     info.text(0.0, 0.36,
-              f"Ledig gulv: {scene.fs.free_area_m2:.1f} m²      Takhøyde: {scene.geometry.room_height_m:.2f} m",
+              f"Ledig gulv: {style.fmt_m2(scene.fs.free_area_m2)}      "
+              f"Takhøyde: {style.fmt_m(scene.geometry.room_height_m)}",
               fontsize=10.5, va="center")
     info.text(0.0, 0.1,
-              f"Eksisterende kasser: {len(existing)}      Foreslåtte nye plasser: {len(candidates)}",
+              f"Eksisterende kasser: {len(existing)}      Foreslåtte nye plasser: {candidates}",
               fontsize=10.5, fontweight="bold", va="center", color=_PROPOSED_EDGE)
 
-    handles: list = [Patch(facecolor=_BIN_STYLE[t][0], edgecolor="#16232e", label=t)
-                     for t in present_types]
-    handles.append(Patch(facecolor=_PROPOSED_FACE, edgecolor=_PROPOSED_EDGE, label="Forslag (ny kasse)"))
-    handles.append(Line2D([0], [0], marker="o", color="none", markerfacecolor=_ENTRANCE,
-                          markersize=10, label="Inngang"))
+    handles = legend_handles(plan.present_types)
     legend_ax.legend(handles=handles, loc="center", frameon=False, fontsize=9.5, handlelength=1.4,
                      labelspacing=0.6, title="Tegnforklaring", title_fontsize=10)
 

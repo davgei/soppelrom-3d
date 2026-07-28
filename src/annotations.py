@@ -118,7 +118,7 @@ def snap_box_to_type(box: "BinBox", floor_height: float | None) -> None:
     box.center[1] = base + height / 2
 
 
-def align_box_to_axis(box: "BinBox", axis_deg: float, max_snap_deg: float = 35.0) -> bool:
+def align_box_to_axis(box: "BinBox", axis_deg: float, max_snap_deg: float = 45.0) -> bool:
     """Rotate the box onto the room's grid (the wall direction), keeping its centre and size.
 
     Measured from the user's own annotations: bins inside one room are almost perfectly parallel to
@@ -127,8 +127,12 @@ def align_box_to_axis(box: "BinBox", axis_deg: float, max_snap_deg: float = 35.0
     is ~37 deg off — the min-area-rect of a partly scanned bin picks an arbitrary angle. Snapping to
     the wall grid therefore makes proposals both straighter and mutually parallel.
 
-    Only the angle is changed (never which side is long), and only when the needed correction is
-    below max_snap_deg, so a genuinely skewed bin is left alone. Returns True if rotated."""
+    Only the angle is changed, never which side is long. max_snap_deg defaults to 45, i.e. always
+    snap to the nearest grid line: 96.8% of annotated bins sit on the room grid (parallel OR
+    perpendicular, almost never in between), and the wall axis is now accurate to ~2.5 deg, so
+    refusing large corrections would just leave the worst proposals crooked. The remaining ~3% of
+    genuinely oblique bins are the accepted cost; they are a keypress away in the editor.
+    Returns True if rotated."""
     candidates = [axis_deg + k * 90.0 for k in range(-4, 5)]
 
     def delta(a: float) -> float:

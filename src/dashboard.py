@@ -27,6 +27,7 @@ VIEWS = [
     ("Rom + mål", "room_topdown.png"),
     ("Ledig gulv", "freespace_over_scene.png"),
     ("Plassering (ny kasse)", "placements.png"),
+    ("I dag / forslag", "before_after.png"),
 ]
 
 # palette matching the statistics page (statistikk.html dark theme)
