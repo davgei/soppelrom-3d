@@ -2,6 +2,15 @@
 
 Usage:  .venv\\Scripts\\python.exe -m src.annotate3d
 
+BACKDROP: Polycam's own export is drawn instead of our Poisson mesh when it is registered and
+passes src/ply_align.py's quality gate (toggle with B; the panel shows the median deviation). This
+is deliberately conservative, because the boxes saved here are the ground truth every model trains
+on: a backdrop that is 20 cm out of place would silently shift them. Nothing geometric changes with
+the backdrop — the floor height, the click-to-floor raycast, box placement, the fixed-size place
+mode and the camera framing all keep using our own mesh and the pipeline's cached floor_height. The
+Polycam cloud is scenery only, loaded in OUR RAW frame (the one mesh_poisson.ply, the boxes and the
+entrances live in), so it cannot move a box even when it is switched on and off mid-session.
+
 CAD-style interactions:
   - "Tegn boks": click corner A on the floor, click corner B (first edge), then PRESS for
     the depth point, DRAG upward to pull the box out of the floor, RELEASE to finish.
@@ -33,6 +42,7 @@ import open3d as o3d
 import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
 
+from . import backdrop
 from .annotations import (
     BIN_TYPES,
     BOX_EDGES,
@@ -156,6 +166,11 @@ class AnnotationApp:
         self._cor = np.zeros(3)
         self._mesh: o3d.geometry.TriangleMesh | None = None
         self._mesh_material: rendering.MaterialRecord | None = None
+        # backdrop preference, remembered across scans but only honoured where the gate passes.
+        # self._mesh stays OUR mesh whatever is on screen: it is what _estimate_floor and the
+        # camera framing read, and the Polycam cloud must never feed either.
+        self.use_polycam = True
+        self._backdrop: backdrop.Backdrop | None = None
         self._tri_normals: np.ndarray | None = None
         self._tri_centers: np.ndarray | None = None
         self._last_cull_eye: np.ndarray | None = None
@@ -235,9 +250,16 @@ class AnnotationApp:
         self.mode_label = gui.Label("")
         self.panel.add_child(self.mode_label)
 
-        self.cull_checkbox = gui.Checkbox("Skjul veggbaksider")
+        self.backdrop_label = gui.Label("")
+        self.panel.add_child(self.backdrop_label)
+        self.polycam_check = gui.Checkbox("Polycam-sky (B)")
+        self.polycam_check.checked = True
+        self.polycam_check.set_on_checked(self._set_polycam)
+        self.panel.add_child(self.polycam_check)
+
+        self.cull_checkbox = gui.Checkbox("Skjul veggbaksider / himling")
         self.cull_checkbox.checked = True
-        self.cull_checkbox.set_on_checked(lambda _checked: self._update_culling(force=True))
+        self.cull_checkbox.set_on_checked(self._on_cull_changed)
         self.panel.add_child(self.cull_checkbox)
 
         self.panel.add_child(gui.Label("Finjuster valgt (5 cm / 5°):"))
@@ -274,6 +296,7 @@ class AnnotationApp:
             "  PgUp/PgDn = høyde, 1-4 = type\n"
             "  Ctrl+C/V = kopier/lim boks\n"
             "  Ctrl+Z = angre, Ctrl+S = lagre\n"
+            "B = Polycam-sky / egen bakgrunn\n"
             "Ctrl+klikk: flytt valgt hit. ESC: avbryt.\n"
             "Oransje = forslag, grønn = godkjent,\nblå = valgt"
         )
@@ -312,6 +335,8 @@ class AnnotationApp:
         self.boxes = []
         self.entrances = []
         self.selected = None
+        self._backdrop = None
+        self.backdrop_label.text = ""
         self.mesh_loaded = False
         self.dirty = False
         self._drawn_boxes = 0
@@ -353,6 +378,15 @@ class AnnotationApp:
         self.entrances = load_entrances(self._current_zip().stem)
         self.status_label.text = f"{len(self.boxes)} bokser ({source})"
 
+        # Polycam's export as the backdrop, but only when the gate passes. gravity_rotation is left
+        # at None on purpose: this tool draws mesh_poisson.ply unrotated and stores boxes and
+        # entrances in that same raw frame, which is exactly the frame ply_align registers into.
+        self._backdrop = backdrop.load(self._current_zip().stem, floor_height=self.floor_height)
+        if self._backdrop.available:
+            cloud_material = backdrop.material()
+            self.scene.scene.add_geometry("polycam", self._backdrop.cloud, cloud_material)
+            self.scene.scene.add_geometry("polycam_low", self._backdrop.dollhouse, cloud_material)
+
         bounds = mesh.get_axis_aligned_bounding_box()
         self.scene.setup_camera(60.0, bounds, bounds.get_center())
         center = np.asarray(bounds.get_center())
@@ -363,6 +397,7 @@ class AnnotationApp:
         self._redraw_boxes()
         self._redraw_entrances()
         self._update_culling(force=True)
+        self._apply_backdrop()
 
     def _switch_scan(self, step: int) -> None:
         self._save()
@@ -383,11 +418,46 @@ class AnnotationApp:
             return True
         return False
 
+    # ---------- backdrop: Polycam's own export vs our Poisson mesh ----------
+
+    def _showing_polycam(self) -> bool:
+        return bool(self._backdrop is not None and self._backdrop.available and self.use_polycam)
+
+    def _show(self, name: str, visible: bool) -> None:
+        if self.scene.scene.has_geometry(name):
+            self.scene.scene.show_geometry(name, bool(visible))
+
+    def _set_polycam(self, wanted: bool) -> None:
+        self.use_polycam = bool(wanted)
+        if not self.use_polycam:
+            self._update_culling(force=True)   # our mesh may be stale after being hidden
+        self._apply_backdrop()
+
+    def _on_cull_changed(self, _checked: bool) -> None:
+        """One checkbox, two mechanisms: backface culling on our one-sided mesh, and the ceiling
+        crop on the Polycam cloud (points have no facing to cull)."""
+        self._update_culling(force=True)
+        self._apply_backdrop()
+
+    def _apply_backdrop(self) -> None:
+        """Show exactly one backdrop and name it in the panel. Visibility only — both geometries
+        are added once per scan, so toggling reloads nothing and registers nothing."""
+        polycam = self._showing_polycam()
+        self._show("room_mesh", not polycam)
+        self._show("polycam", polycam and not self.cull_checkbox.checked)
+        self._show("polycam_low", polycam and self.cull_checkbox.checked)
+        self.backdrop_label.text = (backdrop.status_text(self._backdrop, polycam)
+                                    if self._backdrop is not None else "")
+        self.window.post_redraw()
+
     def _update_culling(self, force: bool = False) -> bool:
         """Hide mesh triangles facing away from the camera. Walls are scanned from one side
         only (normals point into the room), so their backsides disappear when the camera is
         outside — a dollhouse view that makes annotating inside rooms much easier."""
         if self._mesh is None or self._tri_normals is None:
+            return False
+        if self._showing_polycam():
+            # our mesh is hidden anyway; rebuilding it on every camera move would cost for nothing
             return False
         if not self.cull_checkbox.checked:
             if self._last_cull_eye is not None:
@@ -732,6 +802,11 @@ class AnnotationApp:
             return gui.Widget.EventCallbackResult.CONSUMED
         if event.key == gui.KeyName.P:
             self._toggle_place()
+            return gui.Widget.EventCallbackResult.CONSUMED
+        if event.key == gui.KeyName.B:
+            # setting .checked does not fire the handler, so drive the change ourselves
+            self.polycam_check.checked = not self.polycam_check.checked
+            self._set_polycam(self.polycam_check.checked)
             return gui.Widget.EventCallbackResult.CONSUMED
 
         type_keys = {

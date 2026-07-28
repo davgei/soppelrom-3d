@@ -5,6 +5,12 @@ Browse scans and SEE, on the room mesh: the push-path a large bin can be wheeled
 (red boxes) and entrances (magenta). Read-only sibling of the annotation tool — same drag-to-orbit
 controls and Prev/Next scan navigation.
 
+BACKDROP: when Polycam's own export for the scan is registered and passes the quality gate it is
+drawn INSTEAD of our reconstruction (it looks considerably better), toggled with B. Everything
+else — bins, push-path, entrances, camera — is still computed from and positioned by the pipeline's
+own geometry, so the swap is purely what you look at. See src/backdrop.py for the rules; the panel
+always names the cloud on screen, and says why when Polycam is not used.
+
     .venv\\Scripts\\python.exe -m src.place3d
 """
 from __future__ import annotations
@@ -21,7 +27,7 @@ import open3d.visualization.rendering as rendering
 from scipy.ndimage import binary_dilation, label
 from scipy.sparse.csgraph import dijkstra
 
-from . import pipeline, placement
+from . import backdrop, pipeline, placement
 from .annotations import BIN_TYPES
 
 
@@ -407,6 +413,10 @@ class PlacementViewer:
             raise SystemExit("no prepared scans to show — prepare some first")
         self.index = 0
         self.bin_type = bin_type if bin_type in BIN_TYPES else "4-hjuls container"
+        # backdrop preference: remembered across scans, but only honoured where the gate passes
+        self.use_polycam = True
+        self._backdrop: backdrop.Backdrop | None = None
+        self._ours_name = "mesh"   # geometry name our own reconstruction was added under
 
         gui.Application.instance.initialize()
         self.window = gui.Application.instance.create_window("Søppelrom 3D — plassering & skyve-sti", 1500, 950)
@@ -459,6 +469,20 @@ class PlacementViewer:
         self.clock_label = gui.Label("⏱ 0:00")
         self.panel.add_child(self.clock_label)
 
+        self.panel.add_child(gui.Label("Bakgrunn:"))
+        self.backdrop_label = gui.Label("")
+        self.panel.add_child(self.backdrop_label)
+        self.polycam_check = gui.Checkbox("Polycam-sky (B)")
+        self.polycam_check.checked = True
+        self.polycam_check.set_on_checked(self._set_polycam)
+        self.panel.add_child(self.polycam_check)
+        # off by default: a point cloud has no backfaces to cull, so an uncropped Polycam cloud
+        # hides the floor overlays and the bins from the camera this viewer opens with (above the
+        # room). Checking this shows the full height, ceiling and all.
+        self.ceiling_check = gui.Checkbox("Full høyde (m/ himling)")
+        self.ceiling_check.set_on_checked(lambda _v: self._apply_backdrop())
+        self.panel.add_child(self.ceiling_check)
+
         self.panel.add_child(gui.Label("Vis:"))
         self.ground_check = gui.Checkbox("Gulv (ledig/opptatt/rot)")
         self.ground_check.checked = True
@@ -487,7 +511,8 @@ class PlacementViewer:
             "Grå/grønn kasse = eksisterende\n"
             "Rosa kule = inngang\n"
         ))
-        self.panel.add_child(gui.Label("Dra = roter · scroll = zoom\nPil venstre/høyre = bytt skann"))
+        self.panel.add_child(gui.Label("Dra = roter · scroll = zoom\nPil venstre/høyre = bytt skann\n"
+                                       "B = bytt mellom Polycam-sky og egen"))
 
         self.window.add_child(self.panel)
         self.window.set_on_layout(self._on_layout)
@@ -533,7 +558,30 @@ class PlacementViewer:
         if event.key == gui.KeyName.RIGHT:
             self._step(1)
             return gui.Widget.EventCallbackResult.CONSUMED
+        if event.key == gui.KeyName.B:
+            # setting .checked does not fire the handler, so drive the change ourselves
+            self.polycam_check.checked = not self.polycam_check.checked
+            self._set_polycam(self.polycam_check.checked)
+            return gui.Widget.EventCallbackResult.CONSUMED
         return gui.Widget.EventCallbackResult.IGNORED
+
+    # ---------- backdrop: Polycam's own export vs our reconstruction ----------
+
+    def _set_polycam(self, wanted: bool) -> None:
+        self.use_polycam = bool(wanted)
+        self._apply_backdrop()
+
+    def _apply_backdrop(self) -> None:
+        """Show exactly one backdrop and name it in the panel. Pure visibility switching — the
+        geometries are added once per scan, so toggling never reloads or re-registers anything."""
+        choice = self._backdrop
+        polycam = bool(choice is not None and choice.available and self.use_polycam)
+        self._set_visible(self._ours_name, not polycam)
+        self._set_visible("polycam", polycam and self.ceiling_check.checked)
+        self._set_visible("polycam_low", polycam and not self.ceiling_check.checked)
+        self.backdrop_label.text = (backdrop.status_text(choice, polycam)
+                                    if choice is not None else "")
+        self.window.post_redraw()
 
     # ---------- camera: level-horizon turntable orbit + pan (mirrors the annotation tool) ----------
 
@@ -721,6 +769,8 @@ class PlacementViewer:
         except Exception as error:  # noqa: BLE001 - surface any failure in the panel
             self.scene.scene.clear_geometry()
             self._anim = None  # stop the walker from re-adding itself to the cleared scene
+            self._backdrop = None
+            self.backdrop_label.text = ""
             self.stats_label.text = f"Feil: {error}"
             self.window.post_redraw()
             return
@@ -735,13 +785,26 @@ class PlacementViewer:
                 mesh.compute_vertex_normals()
             material = rendering.MaterialRecord()
             material.shader = "defaultLit"
+            self._ours_name = "mesh"
             self.scene.scene.add_geometry("mesh", mesh, material)
             bounds = mesh.get_axis_aligned_bounding_box()
         else:
             material = rendering.MaterialRecord()
             material.shader = "defaultUnlit"
+            self._ours_name = "cloud"
             self.scene.scene.add_geometry("cloud", scene.aligned, material)
             bounds = scene.aligned.get_axis_aligned_bounding_box()
+
+        # Polycam's export as an alternative backdrop, in the gravity-aligned frame this viewer
+        # draws (scene.mesh / scene.aligned are already rotated by scene.rotation). The camera
+        # below is framed on OUR bounds either way, so switching backdrops never moves the view.
+        self._backdrop = backdrop.load(scene.stem, gravity_rotation=scene.rotation,
+                                       floor_height=scene.floor_height)
+        if self._backdrop.available:
+            cloud_material = backdrop.material()
+            self.scene.scene.add_geometry("polycam", self._backdrop.cloud, cloud_material)
+            self.scene.scene.add_geometry("polycam_low", self._backdrop.dollhouse, cloud_material)
+        self._apply_backdrop()
 
         omat = rendering.MaterialRecord()
         omat.shader = "defaultUnlit"
