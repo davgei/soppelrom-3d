@@ -88,6 +88,13 @@ MODE_DRAW = "draw"
 MODE_ENTRANCE = "entrance"
 MODE_PLACE = "place"
 
+# How far above/below the scan's floor_height a box's base may be set by hand. +-3 m is not generous
+# for its own sake: the four scans whose stored floor_height was actually the CEILING were off by
+# 2.7-3.7 m, so the range has to cover a box that needs rescuing from the roof. Fine steps come from
+# the Y-/Y+ buttons, not from dragging a 6 m slider.
+BASE_SLIDER_MIN_M = -3.0
+BASE_SLIDER_MAX_M = 3.0
+
 # Name + palette role per mode. The mode decides what the next click does, so it gets a coloured
 # chip in the panel instead of hiding in a line of grey text.
 MODE_STYLE: dict[str, tuple[str, str]] = {
@@ -176,6 +183,11 @@ class AnnotationApp:
         self._hover_xz: tuple[float, float] | None = None
         self._ctrl_down = False
         self._r_down = False
+        # Guards the height slider against its own set_on_value_changed: assigning double_value fires
+        # the callback, which would write the value back into the box on every redraw.
+        self._syncing_base = False
+        self.base_slider = None
+        self.base_label = None
         self._place_yaw = 0.0                                  # rotation for boxes dropped in place mode
         self._place_anchor_xz: tuple[float, float] | None = None  # frozen centre while rotating with R
         self.mode = MODE_NORMAL
@@ -288,6 +300,13 @@ class AnnotationApp:
         nav.add_child(self._button("Neste >", lambda: self._switch_scan(1),
                                    "Neste skann (lagrer først)"))
         self.panel.add_child(nav)
+        # Skipping past the finished ones is the difference between 322 clicks and 216: stepping one at
+        # a time walks through every scan already done, and they are scattered through the list rather
+        # than gathered at the front.
+        self.panel.add_child(self._button("Neste uannoterte (N)", self._next_unannotated,
+                                          "Hopp til neste skann uten lagrede annoteringer"))
+        self._todo_label = self._text("", "text_muted")
+        self.panel.add_child(self._todo_label)
         self._gap(0.6)
 
         # -- mode line: what the next click will do -----------------------------------------
@@ -345,6 +364,31 @@ class AnnotationApp:
         type_row.add_child(self._text("", "text_muted"))   # keeps the button one column wide
         boxes.add_child(type_row)
         self.panel.add_child(boxes)
+
+        # -- height of the selected box ------------------------------------------------------
+        # Its own section, above the nudge grid, because getting the height right is the thing that
+        # kept going wrong. One floor_height per scan cannot describe a sloping yard or a scan whose
+        # floor plane was fitted to a ramp, and every failure mode was the same shape: the box was in
+        # the right place until something re-seated it. So the height is now set here, by hand, and
+        # nothing else moves it.
+        height_sec = self._section("Høyde over bakken")
+        height_sec.add_child(self._text("0 = gulvet slik analysen fant det.\n"
+                                        "Dra hvis gulvet er feil.", "text_muted"))
+        self.base_slider = gui.Slider(gui.Slider.DOUBLE)
+        self.base_slider.set_limits(BASE_SLIDER_MIN_M, BASE_SLIDER_MAX_M)
+        self.base_slider.set_on_value_changed(self._on_base_slider)
+        height_sec.add_child(self.base_slider)
+        self.base_label = self._text("ingen boks valgt", "text_muted")
+        height_sec.add_child(self.base_label)
+        base_row = self._grid(3)
+        base_row.add_child(self._button("Y- (5 cm)", lambda: self._nudge_base(-0.05),
+                                        "Senk boksen 5 cm"))
+        base_row.add_child(self._button("Y+ (5 cm)", lambda: self._nudge_base(0.05),
+                                        "Hev boksen 5 cm"))
+        base_row.add_child(self._button("På gulvet", self._seat_on_floor,
+                                        "Sett boksen ned på gulvhøyden analysen fant"))
+        height_sec.add_child(base_row)
+        self.panel.add_child(height_sec)
 
         # -- nudge the selected box ----------------------------------------------------------
         nudge = self._section("Finjuster valgt")
@@ -418,9 +462,12 @@ class AnnotationApp:
                                        "rosa = roter. Dra i boksen = flytt."]),
             ("Tastatur (valgt boks)", ["Del = slett · G = godkjenn",
                                        "Piltaster = flytt · Q/E = roter",
-                                       "PgUp/PgDn = høyde · 1-4 = type",
+                                       "PgUp/PgDn = boksens høyde",
+                                       "Home/End = hev/senk boksen",
+                                       "1-4 = type",
                                        "Ctrl+C / Ctrl+V = kopier / lim inn",
                                        "Ctrl+Z = angre · Ctrl+S = lagre"]),
+            ("Skann", ["N = neste uten annoteringer"]),
             ("Visning", ["B = Polycam-sky eller egen bakgrunn"]),
         ]:
             help_section.add_child(self._text(heading, "text"))
@@ -499,6 +546,7 @@ class AnnotationApp:
         zip_path = self._current_zip()
         self._scan_counter.text = f"SKANN {self.scan_index + 1} AV {len(self.scans)}"
         self.scan_label.text = zip_path.stem
+        self._update_todo_label()
 
         if not is_prepared(zip_path):
             self._status("Forbereder i bakgrunnen ...\n(lastes automatisk når klar)", "warning")
@@ -569,6 +617,34 @@ class AnnotationApp:
         self._save()
         self.scan_index = (self.scan_index + step) % len(self.scans)
         self._load_scan()
+
+    def _is_annotated(self, index: int) -> bool:
+        return (ANNOTATION_DIR / f"{self.scans[index].stem}.json").exists()
+
+    def _next_unannotated(self) -> None:
+        """Forward to the next scan with no saved annotations, wrapping once.
+
+        Deliberately checks the file on disk each time instead of caching a to-do list: _save() writes
+        one the moment you leave a scan, and prepare_scan --watch is often adding more in the
+        background, so a list built at startup would be wrong within minutes.
+        """
+        self._save()
+        total = len(self.scans)
+        for offset in range(1, total + 1):
+            index = (self.scan_index + offset) % total
+            if not self._is_annotated(index):
+                if index == self.scan_index:
+                    break                     # wrapped all the way round to where we started
+                self.scan_index = index
+                self._load_scan()
+                return
+        self._status("Alle skann er annotert", "success")
+
+    def _update_todo_label(self) -> None:
+        done = sum(1 for i in range(len(self.scans)) if self._is_annotated(i))
+        left = len(self.scans) - done
+        self._todo_label.text = (f"{done} annotert · {left} igjen" if left
+                                 else f"alle {done} annotert")
 
     def _on_tick(self) -> bool:
         if self.mesh_loaded:
@@ -845,6 +921,7 @@ class AnnotationApp:
         self.box_list.set_items(items)
         if self.selected is not None and self.selected < len(items):
             self.box_list.selected_index = self.selected
+        self._sync_height_ui()
         approved = sum(1 for b in self.boxes if b.status == STATUS_APPROVED)
         # green only when there is nothing left to approve — the count is the progress indicator
         done = bool(self.boxes) and approved == len(self.boxes)
@@ -1016,6 +1093,17 @@ class AnnotationApp:
         if event.key == gui.KeyName.PAGE_DOWN:
             self._nudge(dey=-0.05)
             return gui.Widget.EventCallbackResult.CONSUMED
+        if event.key == gui.KeyName.N:
+            self._next_unannotated()
+            return gui.Widget.EventCallbackResult.CONSUMED
+        # Height of the box off the ground, the thing floor_height kept getting wrong. Home/End rather
+        # than another modifier: both hands stay where they are while stepping a box up or down.
+        if event.key == gui.KeyName.HOME:
+            self._nudge_base(0.05)
+            return gui.Widget.EventCallbackResult.CONSUMED
+        if event.key == gui.KeyName.END:
+            self._nudge_base(-0.05)
+            return gui.Widget.EventCallbackResult.CONSUMED
 
         arrow_moves = {
             gui.KeyName.RIGHT: (1, 0), gui.KeyName.LEFT: (-1, 0),
@@ -1092,10 +1180,71 @@ class AnnotationApp:
             box.center[0], box.center[2] = self._hover_xz
         else:                                        # no hover yet -> beside the original
             box.center[0] += box.extent[0] / 2 + 0.2
-        box.center[1] = self._floor_y() + box.extent[1] / 2
+        # The copy keeps the original's height. You copied that box because it was sitting right, and
+        # dropping the copy onto floor_height would throw away the one thing you had just fixed.
         box.source = "manuell"
         self.boxes.append(box)
         self.selected = len(self.boxes) - 1
+        self.dirty = True
+        self._redraw_boxes()
+
+    # ---------- height of the selected box ----------
+
+    def _base_of(self, box: BinBox) -> float:
+        """Bottom of the box, relative to the scan's floor_height. 0 means sitting on it."""
+        return (box.center[1] - box.extent[1] / 2) - self._floor_y()
+
+    def _set_base(self, box: BinBox, base: float) -> None:
+        base = max(BASE_SLIDER_MIN_M, min(BASE_SLIDER_MAX_M, base))
+        box.center[1] = self._floor_y() + base + box.extent[1] / 2
+
+    def _sync_height_ui(self) -> None:
+        """Point the slider at the selected box. Called from _redraw_boxes, so it stays right no
+        matter which path changed the selection or the geometry."""
+        if getattr(self, "base_slider", None) is None:
+            return                       # panel not built yet (called during construction)
+        box = self.boxes[self.selected] if self.selected is not None else None
+        self.base_slider.enabled = box is not None
+        if box is None:
+            self.base_label.text = "ingen boks valgt"
+            return
+        base = self._base_of(box)
+        # Guarded: assigning double_value fires the callback in Open3D, which would write the clamped
+        # value straight back into the box and quietly drag it towards the slider's range.
+        self._syncing_base = True
+        try:
+            self.base_slider.double_value = max(BASE_SLIDER_MIN_M, min(BASE_SLIDER_MAX_M, base))
+        finally:
+            self._syncing_base = False
+        self.base_label.text = (f"{base:+.2f} m fra gulvet\n"
+                                f"bunn {box.center[1] - box.extent[1] / 2:.2f}  "
+                                f"høyde {box.extent[1]:.2f} m")
+
+    def _on_base_slider(self, value: float) -> None:
+        if self._syncing_base or self.selected is None:
+            return
+        self._push_undo()
+        self._set_base(self.boxes[self.selected], float(value))
+        self.dirty = True
+        self._redraw_boxes()
+
+    def _nudge_base(self, dy: float) -> None:
+        if self.selected is None:
+            self._status("Velg en boks først", "warning")
+            return
+        self._push_undo()
+        box = self.boxes[self.selected]
+        self._set_base(box, self._base_of(box) + dy)
+        self.dirty = True
+        self._redraw_boxes()
+
+    def _seat_on_floor(self) -> None:
+        """Put the box back on floor_height — useful when the floor IS right and only this box drifted."""
+        if self.selected is None:
+            self._status("Velg en boks først", "warning")
+            return
+        self._push_undo()
+        self._set_base(self.boxes[self.selected], 0.0)
         self.dirty = True
         self._redraw_boxes()
 
@@ -1341,7 +1490,7 @@ class AnnotationApp:
                         box = self.boxes[self.selected]
                         box.center[0] = float(floor_point[0])
                         box.center[2] = float(floor_point[2])
-                        box.center[1] = self._floor_y() + box.extent[1] / 2
+                        # height left alone on purpose -- see the "move" branch in _mouse_normal
                         self.dirty = True
                         self._redraw_boxes()
                 return gui.Widget.EventCallbackResult.CONSUMED
@@ -1402,7 +1551,9 @@ class AnnotationApp:
                     offset = self.drag["offset_xz"]
                     box.center[0] = float(floor_point[0] + offset[0])
                     box.center[2] = float(floor_point[2] + offset[1])
-                    box.center[1] = self._floor_y() + box.extent[1] / 2
+                    # Y is deliberately NOT touched. Re-seating to floor_height on every move is what
+                    # threw a correctly-placed box up to a wrong floor the moment you nudged it
+                    # sideways; the height is now the operator's to set (see the Høyde slider).
             elif kind == "corner":
                 floor_point = self._ray_floor(ray)
                 if floor_point is not None:
@@ -1422,8 +1573,11 @@ class AnnotationApp:
             elif kind == "top":
                 center_xz = np.array([box.center[0], box.center[2]])
                 height = self._height_from_ray(ray, center_xz)
+                # Grow from the box's OWN base, not from floor_height: dragging the top handle used to
+                # silently move the bottom too, undoing whatever height had been set for it.
+                base = box.center[1] - box.extent[1] / 2
                 box.extent[1] = height
-                box.center[1] = self._floor_y() + height / 2
+                box.center[1] = base + height / 2
             elif kind == "rotate":
                 floor_point = self._ray_floor(ray)
                 if floor_point is not None:
