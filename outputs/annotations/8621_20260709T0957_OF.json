@@ -1,0 +1,78 @@
+{
+  "scan": "8621_20260709T0957_OF.zip",
+  "floor_height": -1.2672777370291495,
+  "boxes": [
+    {
+      "center": [
+        0.11745327711105347,
+        -0.6422777370291495,
+        4.028385162353516
+      ],
+      "extent": [
+        1.37,
+        1.25,
+        0.78
+      ],
+      "yaw_deg": -100.7342927670865,
+      "bin_type": "4-hjuls container",
+      "status": "godkjent",
+      "source": "auto",
+      "n_views": 225,
+      "confidence": 0.979
+    },
+    {
+      "center": [
+        0.10886065519512389,
+        -0.6422777370291495,
+        2.530569178566805
+      ],
+      "extent": [
+        1.37,
+        1.25,
+        0.78
+      ],
+      "yaw_deg": -83.19330927829087,
+      "bin_type": "4-hjuls container",
+      "status": "godkjent",
+      "source": "manuell",
+      "n_views": 225,
+      "confidence": 0.979
+    },
+    {
+      "center": [
+        0.04658030662981627,
+        -0.6422777370291495,
+        5.312894038175358
+      ],
+      "extent": [
+        1.37,
+        1.25,
+        0.78
+      ],
+      "yaw_deg": -92.89732123708076,
+      "bin_type": "4-hjuls container",
+      "status": "godkjent",
+      "source": "manuell",
+      "n_views": 225,
+      "confidence": 0.979
+    },
+    {
+      "center": [
+        0.1395058693479605,
+        -0.6422777370291495,
+        6.910751049278001
+      ],
+      "extent": [
+        1.37,
+        1.25,
+        0.78
+      ],
+      "yaw_deg": -95.38562685140678,
+      "bin_type": "4-hjuls container",
+      "status": "godkjent",
+      "source": "manuell",
+      "n_views": 225,
+      "confidence": 0.979
+    }
+  ]
+}

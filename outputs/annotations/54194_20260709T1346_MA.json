@@ -4,9 +4,9 @@
   "boxes": [
     {
       "center": [
-        0.8998203277587891,
+        -0.9152949225170937,
         -0.5753123182733151,
-        -1.740707278251648
+        -1.0816892015760258
       ],
       "extent": [
         1.37,
@@ -15,28 +15,82 @@
       ],
       "yaw_deg": -90.11897929736017,
       "bin_type": "4-hjuls container",
-      "status": "forslag",
+      "status": "godkjent",
       "source": "auto",
       "n_views": 186,
       "confidence": 0.975
     },
     {
       "center": [
-        1.4015166759490967,
+        -0.9294118405122869,
         -0.5753123182733151,
-        -0.11151045560836792
+        -2.5850422439189518
       ],
       "extent": [
-        0.78,
+        1.37,
         1.25,
-        1.37
+        0.78
       ],
-      "yaw_deg": -179.91704483637085,
+      "yaw_deg": -90.11897929736017,
       "bin_type": "4-hjuls container",
-      "status": "forslag",
-      "source": "auto",
-      "n_views": 10,
-      "confidence": 0.851
+      "status": "godkjent",
+      "source": "manuell",
+      "n_views": 186,
+      "confidence": 0.975
+    },
+    {
+      "center": [
+        1.0351631406695674,
+        -0.6253123182733151,
+        -1.29846620798253
+      ],
+      "extent": [
+        0.6,
+        1.15,
+        0.75
+      ],
+      "yaw_deg": 92.32172716407153,
+      "bin_type": "2-hjuls dunk",
+      "status": "godkjent",
+      "source": "manuell",
+      "n_views": 0,
+      "confidence": 0.0
+    },
+    {
+      "center": [
+        0.9696246380536371,
+        -0.6253123182733151,
+        -2.051225190355378
+      ],
+      "extent": [
+        0.6,
+        1.15,
+        0.75
+      ],
+      "yaw_deg": 92.32172716407153,
+      "bin_type": "2-hjuls dunk",
+      "status": "godkjent",
+      "source": "manuell",
+      "n_views": 0,
+      "confidence": 0.0
+    },
+    {
+      "center": [
+        0.7478443646246737,
+        -0.6253123182733151,
+        -2.7787153920422103
+      ],
+      "extent": [
+        0.6,
+        1.15,
+        0.75
+      ],
+      "yaw_deg": 92.32172716407153,
+      "bin_type": "2-hjuls dunk",
+      "status": "godkjent",
+      "source": "manuell",
+      "n_views": 0,
+      "confidence": 0.0
     }
   ]
 }

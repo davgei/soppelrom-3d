@@ -368,7 +368,11 @@ def _unit2(direction: np.ndarray) -> np.ndarray:
     return d / norm if norm > 1e-6 else np.array([1.0, 0.0])
 
 
-TRUCK_CLEARANCE_M = 1.2   # how far past the room boundary the rear hopper should sit
+# The truck mesh already starts 1.55 m from its anchor and runs outwards to 5.45 m, so anchoring
+# almost ON the dump point puts the hopper right beside it with the body pointing away — which is how
+# a lorry actually stands. Marching out past the room boundary first (an earlier attempt) parked it
+# absurdly far away; what matters is the DIRECTION being away from the cloud, not the distance.
+TRUCK_STANDOFF_M = 0.3
 
 
 def _truck_anchor(scene, dump_pos, arrive_dir) -> tuple[np.ndarray, np.ndarray]:
@@ -395,23 +399,7 @@ def _truck_anchor(scene, dump_pos, arrive_dir) -> tuple[np.ndarray, np.ndarray]:
         if float(arrive @ outward) > 0.2:     # the walk already leaves the room — keep that heading
             outward = arrive
 
-    def inside(point) -> bool:
-        c = int(np.floor((point[0] - origin[0]) / cell))
-        r = int(np.floor((point[1] - origin[1]) / cell))
-        return 0 <= r < rows and 0 <= c < cols and bool(mask[r, c])
-
-    exit_at, clear = None, 0.0
-    for step in np.arange(0.0, 14.0, 0.25):   # find where we leave the room and STAY out
-        if inside(start + outward * step):
-            exit_at, clear = None, 0.0
-            continue
-        if exit_at is None:
-            exit_at = float(step)
-        clear += 0.25
-        if clear >= 1.0:                      # a full metre outside: this really is the boundary
-            break
-    distance = (exit_at if exit_at is not None else 0.0) + TRUCK_CLEARANCE_M
-    return start + outward * distance, outward
+    return start + outward * TRUCK_STANDOFF_M, outward
 
 
 def _truck_mesh(pos: np.ndarray, direction_out: np.ndarray, floor: float) -> o3d.geometry.TriangleMesh:

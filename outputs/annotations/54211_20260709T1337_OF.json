@@ -1,0 +1,96 @@
+{
+  "scan": "54211_20260709T1337_OF.zip",
+  "floor_height": -1.321413059669402,
+  "boxes": [
+    {
+      "center": [
+        0.5459603212159753,
+        -0.696413059669402,
+        -2.9325726824020744
+      ],
+      "extent": [
+        1.2314531031371974,
+        1.25,
+        0.763593509780579
+      ],
+      "yaw_deg": 50.61474816762352,
+      "bin_type": "4-hjuls container",
+      "status": "godkjent",
+      "source": "auto",
+      "n_views": 189,
+      "confidence": 0.995
+    },
+    {
+      "center": [
+        -0.5096220702558631,
+        -0.696413059669402,
+        -3.3760865181915194
+      ],
+      "extent": [
+        0.78,
+        1.25,
+        1.37
+      ],
+      "yaw_deg": 51.37478380529064,
+      "bin_type": "4-hjuls container",
+      "status": "godkjent",
+      "source": "auto",
+      "n_views": 189,
+      "confidence": 0.995
+    },
+    {
+      "center": [
+        1.309063612591324,
+        -0.696413059669402,
+        -1.9647173560387268
+      ],
+      "extent": [
+        1.2314531031371974,
+        1.25,
+        0.763593509780579
+      ],
+      "yaw_deg": 50.61474816762352,
+      "bin_type": "4-hjuls container",
+      "status": "godkjent",
+      "source": "manuell",
+      "n_views": 189,
+      "confidence": 0.995
+    },
+    {
+      "center": [
+        2.1457491564557416,
+        -0.696413059669402,
+        -0.8445492812167178
+      ],
+      "extent": [
+        1.2314531031371974,
+        1.25,
+        0.763593509780579
+      ],
+      "yaw_deg": 50.61474816762352,
+      "bin_type": "4-hjuls container",
+      "status": "godkjent",
+      "source": "manuell",
+      "n_views": 189,
+      "confidence": 0.995
+    },
+    {
+      "center": [
+        2.4828123695718034,
+        -0.696413059669402,
+        0.12772420506531856
+      ],
+      "extent": [
+        0.78,
+        1.25,
+        1.37
+      ],
+      "yaw_deg": 51.37478380529064,
+      "bin_type": "4-hjuls container",
+      "status": "godkjent",
+      "source": "manuell",
+      "n_views": 189,
+      "confidence": 0.995
+    }
+  ]
+}

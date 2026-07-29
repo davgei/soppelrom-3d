@@ -1,0 +1,24 @@
+{
+  "scan": "76462_20260710T1324_KSL.zip",
+  "floor_height": -1.2081394694603695,
+  "boxes": [
+    {
+      "center": [
+        -3.7993187321608906,
+        -0.5831394694603695,
+        1.8154141712988083
+      ],
+      "extent": [
+        0.78,
+        1.25,
+        1.37
+      ],
+      "yaw_deg": 60.74610800787454,
+      "bin_type": "4-hjuls container",
+      "status": "godkjent",
+      "source": "auto",
+      "n_views": 55,
+      "confidence": 1.0
+    }
+  ]
+}

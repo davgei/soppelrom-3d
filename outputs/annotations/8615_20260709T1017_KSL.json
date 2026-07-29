@@ -1,0 +1,96 @@
+{
+  "scan": "8615_20260709T1017_KSL.zip",
+  "floor_height": -1.2760463461332918,
+  "boxes": [
+    {
+      "center": [
+        -0.6777877453490535,
+        -0.6510463461332918,
+        -2.603085684089985
+      ],
+      "extent": [
+        1.37,
+        1.25,
+        0.78
+      ],
+      "yaw_deg": 171.38709310294203,
+      "bin_type": "4-hjuls container",
+      "status": "godkjent",
+      "source": "auto",
+      "n_views": 354,
+      "confidence": 1.0
+    },
+    {
+      "center": [
+        -2.0561214612692433,
+        -0.6510463461332918,
+        -2.3679644600129697
+      ],
+      "extent": [
+        0.78,
+        1.25,
+        1.37
+      ],
+      "yaw_deg": 77.1658464095259,
+      "bin_type": "4-hjuls container",
+      "status": "godkjent",
+      "source": "auto",
+      "n_views": 354,
+      "confidence": 1.0
+    },
+    {
+      "center": [
+        -0.0565209276398948,
+        -0.7010463461332919,
+        -1.8110569196043547
+      ],
+      "extent": [
+        0.6,
+        1.15,
+        0.75
+      ],
+      "yaw_deg": -129.6562037805649,
+      "bin_type": "2-hjuls dunk",
+      "status": "godkjent",
+      "source": "auto",
+      "n_views": 2,
+      "confidence": 0.655
+    },
+    {
+      "center": [
+        0.7467526266881408,
+        -0.7010463461332919,
+        -0.6227340756386921
+      ],
+      "extent": [
+        0.6,
+        1.15,
+        0.75
+      ],
+      "yaw_deg": -106.06658498924925,
+      "bin_type": "2-hjuls dunk",
+      "status": "godkjent",
+      "source": "manuell",
+      "n_views": 2,
+      "confidence": 0.655
+    },
+    {
+      "center": [
+        0.32174768600523795,
+        -0.7010463461332919,
+        -1.220210868341686
+      ],
+      "extent": [
+        0.6,
+        1.15,
+        0.75
+      ],
+      "yaw_deg": -121.53412111006308,
+      "bin_type": "2-hjuls dunk",
+      "status": "godkjent",
+      "source": "manuell",
+      "n_views": 2,
+      "confidence": 0.655
+    }
+  ]
+}

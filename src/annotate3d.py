@@ -375,6 +375,21 @@ class AnnotationApp:
             source = "auto-forslag"
         if self.floor_height is None:  # missing in cache -> estimate from the mesh so boxes sit on the floor
             self.floor_height = _estimate_floor(mesh)
+        else:
+            # Sanity-check a STORED floor height against the mesh. Files written before the
+            # ceiling-vs-floor fix can carry the CEILING as the floor (measured: 4 scans off by
+            # 2.7-3.7 m, e.g. Skjelderups gate 14B stored 1.87 where the floor is -1.17). Every box
+            # and entrance is then drawn at ceiling height and nothing can be placed on the ground.
+            # The mesh estimate (mode of the lower band) is independent and was within 0.01-0.24 m of
+            # the truth on exactly those scans, so a large disagreement means the stored value is
+            # wrong, not the mesh.
+            estimated = _estimate_floor(mesh)
+            if abs(self.floor_height - estimated) > 0.60:
+                print(f"[annoter] {self._current_zip().stem}: lagret gulvhøyde "
+                      f"{self.floor_height:.2f} m avviker {abs(self.floor_height - estimated):.2f} m "
+                      f"fra meshet — bruker {estimated:.2f} m i stedet", flush=True)
+                self.floor_height = estimated
+                self.dirty = True   # so the corrected height is saved with the annotations
         self.entrances = load_entrances(self._current_zip().stem)
         self.status_label.text = f"{len(self.boxes)} bokser ({source})"
 

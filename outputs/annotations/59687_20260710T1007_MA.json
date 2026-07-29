@@ -1,0 +1,114 @@
+{
+  "scan": "59687_20260710T1007_MA.zip",
+  "floor_height": -1.1782421585334646,
+  "boxes": [
+    {
+      "center": [
+        -1.156339406967163,
+        -0.5532421585334646,
+        -0.8425179719924927
+      ],
+      "extent": [
+        0.78,
+        1.25,
+        1.37
+      ],
+      "yaw_deg": 273.5234375,
+      "bin_type": "4-hjuls container",
+      "status": "godkjent",
+      "source": "auto",
+      "n_views": 18,
+      "confidence": 1.0
+    },
+    {
+      "center": [
+        -1.7749831676483154,
+        -0.5532421585334646,
+        1.2466949224472046
+      ],
+      "extent": [
+        1.37,
+        1.25,
+        0.78
+      ],
+      "yaw_deg": 3.5234375,
+      "bin_type": "4-hjuls container",
+      "status": "godkjent",
+      "source": "auto",
+      "n_views": 60,
+      "confidence": 0.983
+    },
+    {
+      "center": [
+        0.33981024063680176,
+        -0.5532421585334646,
+        1.4504765859238309
+      ],
+      "extent": [
+        1.2807207323250798,
+        1.25,
+        0.7622288686027161
+      ],
+      "yaw_deg": 3.5234375,
+      "bin_type": "4-hjuls container",
+      "status": "godkjent",
+      "source": "manuell",
+      "n_views": 60,
+      "confidence": 0.983
+    },
+    {
+      "center": [
+        1.8944930004003229,
+        -0.5532421585334646,
+        1.521151407395915
+      ],
+      "extent": [
+        1.37,
+        1.25,
+        0.78
+      ],
+      "yaw_deg": 3.5234375,
+      "bin_type": "4-hjuls container",
+      "status": "godkjent",
+      "source": "manuell",
+      "n_views": 60,
+      "confidence": 0.983
+    },
+    {
+      "center": [
+        2.0753901368029237,
+        -0.5532421585334646,
+        0.6213384589479332
+      ],
+      "extent": [
+        1.37,
+        1.25,
+        0.78
+      ],
+      "yaw_deg": 24.543821012048436,
+      "bin_type": "4-hjuls container",
+      "status": "godkjent",
+      "source": "manuell",
+      "n_views": 60,
+      "confidence": 0.983
+    },
+    {
+      "center": [
+        2.2955050479987467,
+        -0.5532421585334646,
+        -0.6333393910120408
+      ],
+      "extent": [
+        1.37,
+        1.25,
+        0.78
+      ],
+      "yaw_deg": 3.5234375,
+      "bin_type": "4-hjuls container",
+      "status": "godkjent",
+      "source": "manuell",
+      "n_views": 60,
+      "confidence": 0.983
+    }
+  ]
+}
