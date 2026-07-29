@@ -11,11 +11,20 @@ else — bins, push-path, entrances, camera — is still computed from and posit
 own geometry, so the swap is purely what you look at. See src/backdrop.py for the rules; the panel
 always names the cloud on screen, and says why when Polycam is not used.
 
+PANEL / SCALING: Open3D's gui has no reflowing layout manager — every size is a number the caller
+computes — so every number here is a multiple of window.theme.font_size (an "em", via uitheme.em).
+That is what makes the panel and its buttons follow the theme font and the display's DPI instead of
+clipping at 150% scaling. The panel itself is a gui.ScrollableVert holding gui.CollapsableVert
+sections: content that does not fit gets a scrollbar rather than being cut off, and a section the
+user does not need can be folded away. Colours come from src/uitheme.py (which derives them from
+src/style.py), so a green box means the same thing here as in the rendered preview PNGs.
+
     .venv\\Scripts\\python.exe -m src.place3d
 """
 from __future__ import annotations
 
 import math
+import textwrap
 import time
 from pathlib import Path
 
@@ -24,10 +33,11 @@ import numpy as np
 import open3d as o3d
 import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
-from scipy.ndimage import binary_dilation, label
+from scipy.ndimage import binary_closing, binary_dilation, label
 from scipy.sparse.csgraph import dijkstra
 
 from . import backdrop, pipeline, placement
+from . import uitheme as T
 from .annotations import BIN_TYPES
 
 
@@ -47,12 +57,17 @@ def _bin_box_lineset(rect: tuple, y_min: float, y_max: float, color) -> o3d.geom
     lineset.paint_uniform_color(list(color))
     return lineset
 
-FREE_COLOR = (0.10, 0.80, 0.10)      # green  = free bin space
-PATH_COLOR = (0.20, 0.45, 1.00)      # blue   = push-path a large bin can reach a door through
-ROUTE_COLOR = (0.15, 0.75, 1.00)     # bright = the near-straight route the corridor is built on
-OCC_COLOR = (0.85, 0.10, 0.10)       # red    = occupied floor
-PROPOSAL_COLOR = (0.25, 0.55, 0.95)  # translucent BLUE ghost bin = suggested new bin
-ENTRANCE_COLOR = (1.00, 0.10, 1.00)  # magenta sphere = entrance
+# Scene semantics — the SAME colours the preview PNGs are drawn with (uitheme derives them from
+# style.py). Do not hand-tune them here: that is exactly how "green" came to mean three different
+# things in three windows. The proposal ghost used to be blue, which collided with the blue
+# push-path it stands on; it is green now, like the proposed bins in every rendered sheet.
+FREE_COLOR = T.rgb_of("free_floor")       # green   = free bin space
+PATH_COLOR = T.rgb_of("path")             # blue    = push-path a large bin can reach a door through
+ROUTE_COLOR = T.rgb_of("path_soft")       # brighter= the near-straight route the corridor is built on
+OCC_COLOR = T.rgb_of("occupied_floor")    # red     = occupied floor
+PROPOSAL_COLOR = T.rgb_of("new_bin")      # translucent GREEN ghost bin = suggested new bin
+ENTRANCE_COLOR = T.rgb_of("entrance")     # magenta sphere = entrance
+EXISTING_EDGE_COLOR = T.rgb_of("existing_bin")  # red wireframe around a bin that is already there
 
 ANIM_SPEED_WALK = 1.05    # m/s walking empty-handed
 ANIM_WHEEL_SPEED = {      # m/s wheeling a bin: big bins roll faster, a full bin is heavier
@@ -61,10 +76,13 @@ ANIM_WHEEL_SPEED = {      # m/s wheeling a bin: big bins roll faster, a full bin
 }
 ANIM_EMPTY_SECONDS = 2.8  # duration of the tipping animation at the truck
 ANIM_STRIDE_M = 1.0       # metres per full walk cycle (drives the leg swing)
+# The worker, his bin and the truck are PROPS, not data: they are painted like the real objects
+# (hi-vis orange, grey container / green dunk, green lorry) and deliberately stay outside the
+# semantic palette, so no reader mistakes them for a measurement.
 FIGURE_COLOR = (1.0, 0.45, 0.05)     # hi-vis orange — the renovation worker
 HEAD_COLOR = (0.96, 0.83, 0.66)
 BIN_HEIGHT = {"stor": 1.25, "liten": 1.15}  # real Norwegian bin heights (4-hjuls / 2-hjuls)
-CLUTTER_COLOR = (1.00, 0.62, 0.12)          # orange floor = clutter blocking it (not bins, not walls)
+CLUTTER_COLOR = T.rgb_of("warning")         # amber floor = clutter blocking it (not bins, not walls)
 BIN_BODY_COLOR = {"stor": (0.16, 0.17, 0.19), "liten": (0.47, 0.60, 0.38)}  # norsk: grå container, grønn dunk
 BIN_TIP_DEG = {"stor": 45.0, "liten": 55.0}  # max tipping angle at the truck hopper
 WHEEL_COLOR = (0.06, 0.06, 0.06)
@@ -107,55 +125,111 @@ def _walk_legs(scene) -> list[dict]:
     centers = [np.array([b[0], b[1]], dtype=float) for b in bins]
 
     fs = scene.fs
-    reach = scene.result.reachable
+    cell, origin = fs.cell, fs.origin
     to_bin: list[np.ndarray | None] = [None] * len(bins)     # entrance -> bin i
     between: list[np.ndarray | None] = [None] * len(bins)    # bin i-1 -> bin i
+    bins_mask = placement._boxes_mask(bins, origin, cell, fs.free.shape, grow=0.05)
+
+    def route_over(passable: np.ndarray) -> tuple[list, list]:
+        """Shortest paths entrance->bin and bin->bin across `passable`, or Nones where unreachable."""
+        outs: list[np.ndarray | None] = [None] * len(bins)
+        betweens: list[np.ndarray | None] = [None] * len(bins)
+        if passable is None or not passable.any():
+            return outs, betweens
+        graph, node_id, ys, xs = placement._grid_graph(passable, np.ones(passable.shape))
+
+        def node_at(xz: np.ndarray) -> int:
+            col = int(round((xz[0] - origin[0]) / cell))
+            row = int(round((xz[1] - origin[1]) / cell))
+            near = placement._nearest_true(passable, row, col)
+            return int(node_id[near]) if near is not None else -1
+
+        nodes = [node_at(start)] + [node_at(c) for c in centers]
+        if any(n < 0 for n in nodes):
+            return outs, betweens
+        dist, pred = dijkstra(graph, directed=False, indices=nodes, return_predecessors=True)
+
+        def path(k: int, t: int, anchor: np.ndarray | None) -> np.ndarray | None:
+            """World polyline from source #k to node t (anchor prepended if given)."""
+            if t < 0 or not np.isfinite(dist[k, t]):
+                return None
+            cells: list[tuple[int, int]] = []
+            node, guard = t, 0
+            while node >= 0 and guard < ys.size + 5:
+                cells.append((int(ys[node]), int(xs[node])))
+                node = int(pred[k, node])
+                guard += 1
+            cells.reverse()
+            pts = np.array([[origin[0] + (c + 0.5) * cell, origin[1] + (r + 0.5) * cell]
+                            for r, c in cells])
+            if anchor is not None:
+                pts = np.vstack([anchor[None, :], pts])
+            if len(pts) > 4:  # light downsample, keeping the exact endpoints
+                pts = np.vstack([pts[0], pts[1:-1:2], pts[-1]])
+            return pts
+
+        for i in range(len(bins)):
+            outs[i] = path(0, nodes[i + 1], start)
+            if i > 0:
+                betweens[i] = path(i, nodes[i + 1], None)
+        return outs, betweens
+
+    # First choice: the push-path corridor with the bins blocked, so he walks the route a bin is
+    # actually wheeled along and goes AROUND the other bins.
+    reach = scene.result.reachable
     if reach is not None and reach.any():
-        cell, origin = fs.cell, fs.origin
-        bins_mask = placement._boxes_mask(bins, origin, cell, reach.shape, grow=0.05)
-        strict = reach & ~bins_mask
-        if strict.any():
-            graph, node_id, ys, xs = placement._grid_graph(strict, np.ones(strict.shape))
+        to_bin, between = route_over(reach & ~bins_mask)
 
-            def node_at(xz: np.ndarray) -> int:
-                col = int(round((xz[0] - origin[0]) / cell))
-                row = int(round((xz[1] - origin[1]) / cell))
-                near = placement._nearest_true(strict, row, col)
-                return int(node_id[near]) if near is not None else -1
+    # Fallback: the free floor. The corridor is only as wide as the largest bin, so a bin standing in
+    # a nook can sit outside it (measured: 1653 had 0 of 1 bins reachable through the corridor) — and
+    # the old fallback was a STRAIGHT LINE from the entrance, which walked through walls and off the
+    # floor entirely. Any walkable floor route is better than that.
+    if any(p is None for p in to_bin) or any(between[i] is None for i in range(1, len(bins))):
+        floor = fs.free & ~bins_mask
+        if floor.any():
+            floor = binary_closing(floor, iterations=max(1, int(0.15 / cell))) & fs.floor_observed
+            alt_to, alt_between = route_over(floor & ~bins_mask)
+            for i in range(len(bins)):
+                if to_bin[i] is None:
+                    to_bin[i] = alt_to[i]
+                if i > 0 and between[i] is None:
+                    between[i] = alt_between[i]
 
-            nodes = [node_at(start)] + [node_at(c) for c in centers]
-            if all(n >= 0 for n in nodes):
-                dist, pred = dijkstra(graph, directed=False, indices=nodes, return_predecessors=True)
+    # Last routed attempt: ANY observed floor, ignoring clutter. A bin wedged behind junk is still
+    # reachable in real life (you shove the junk aside), and walking over clutter is far less wrong
+    # than being dropped from the round — 76858 lost all 3 bins, i.e. the whole animation, when this
+    # tier was missing. Still never leaves the scanned floor.
+    if any(p is None for p in to_bin) or any(between[i] is None for i in range(1, len(bins))):
+        rough = np.asarray(fs.floor_observed, dtype=bool) & ~bins_mask
+        if rough.any():
+            alt_to, alt_between = route_over(rough)
+            for i in range(len(bins)):
+                if to_bin[i] is None:
+                    to_bin[i] = alt_to[i]
+                if i > 0 and between[i] is None:
+                    between[i] = alt_between[i]
 
-                def path(k: int, t: int, anchor: np.ndarray | None) -> np.ndarray | None:
-                    """World polyline from source #k to node t (anchor prepended if given)."""
-                    if t < 0 or not np.isfinite(dist[k, t]):
-                        return None
-                    cells: list[tuple[int, int]] = []
-                    node, guard = t, 0
-                    while node >= 0 and guard < ys.size + 5:
-                        cells.append((int(ys[node]), int(xs[node])))
-                        node = int(pred[k, node])
-                        guard += 1
-                    cells.reverse()
-                    pts = np.array([[origin[0] + (c + 0.5) * cell, origin[1] + (r + 0.5) * cell]
-                                    for r, c in cells])
-                    if anchor is not None:
-                        pts = np.vstack([anchor[None, :], pts])
-                    if len(pts) > 4:  # light downsample, keeping the exact endpoints
-                        pts = np.vstack([pts[0], pts[1:-1:2], pts[-1]])
-                    return pts
-
-                for i in range(len(bins)):
-                    to_bin[i] = path(0, nodes[i + 1], start)
-                    if i > 0:
-                        between[i] = path(i, nodes[i + 1], None)
-
-    for i in range(len(bins)):  # straight-line last resort (never for the return: it reuses to_bin)
-        if to_bin[i] is None:
-            to_bin[i] = np.array([start, centers[i]])
-        if i > 0 and between[i] is None:
-            between[i] = np.array([centers[i - 1], centers[i]])
+    # Still unreachable = genuinely cut off. Drop that bin from the round instead of teleporting the
+    # walker through a wall; a missing bin is honest, a straight line through the building is not.
+    keep = [i for i in range(len(bins)) if to_bin[i] is not None]
+    if len(keep) != len(bins):
+        dropped = [bins[i] for i in range(len(bins)) if i not in keep]
+        print(f"[henterunde] {len(dropped)} kasse(r) uten gangbar rute — utelatt fra animasjonen",
+              flush=True)
+        bins = [bins[i] for i in keep]
+        sizes = [sizes[i] for i in keep]
+        dims = [dims[i] for i in keep]
+        centers = [centers[i] for i in keep]
+        to_bin = [to_bin[i] for i in keep]
+        between = [between[i] for i in keep]
+    if not bins:
+        return []
+    # A bin can be reachable from the ENTRANCE but not from the PREVIOUS bin (blocked doorway, or the
+    # previous bin was dropped). Walking out and in again is correct and always available, so use it —
+    # leaving between[i] as None crashed _leg with a 0-d array.
+    for i in range(1, len(bins)):
+        if between[i] is None:
+            between[i] = to_bin[i]
 
     legs: list[dict] = []
 
@@ -166,9 +240,16 @@ def _walk_legs(scene) -> list[dict]:
     for i in range(len(bins)):
         add(_leg(to_bin[i] if i == 0 else between[i], "walk", sizes[i]))
         add(_leg(to_bin[i][::-1].copy(), "full", sizes[i], dims[i], order[i]))
+        # He must tip the bin TOWARD THE TRUCK, not back the way he came. The truck is anchored just
+        # outside the dump spot, so its direction is what the figure and the bin should face; using the
+        # arrival heading made him tip into thin air whenever the two differed.
         arrive_dir = (to_bin[i][0] - to_bin[i][1]) if len(to_bin[i]) > 1 else np.array([1.0, 0.0])
+        truck_pos, _ = _truck_anchor(scene, to_bin[i][0], arrive_dir)
+        dump_dir = np.asarray(truck_pos, dtype=float) - np.asarray(to_bin[i][0], dtype=float)
+        if float(np.hypot(*dump_dir)) < 1e-6:
+            dump_dir = arrive_dir
         legs.append({"kind": "pause", "total": ANIM_EMPTY_SECONDS, "pos": to_bin[i][0],
-                     "dir": arrive_dir, "mode": "dump", "size": sizes[i],
+                     "dir": dump_dir, "mode": "dump", "size": sizes[i],
                      "dims": dims[i], "bin_idx": order[i]})
         add(_leg(to_bin[i].copy(), "tom", sizes[i], dims[i], order[i]))
     add(_leg(to_bin[-1][::-1].copy(), "walk", None))  # walk back out empty-handed
@@ -440,6 +521,88 @@ def _trash_bits_mesh(tau: float, mouth: np.ndarray, direction: np.ndarray,
     return bits
 
 
+# ---------------------------------------------------------------- panel geometry (everything in em)
+
+# The panel asks for a share of the window and is then clamped: never narrower than the longest
+# checkbox label needs, never wider than it can use, so a 4K window spends its extra pixels on the
+# 3D view. Expressed in em, so the clamp follows the theme font / DPI instead of fighting it.
+PANEL_MIN_EM = 20.0
+PANEL_MAX_EM = 27.0
+PANEL_FRACTION = 0.26     # wanted share of the window width
+PANEL_MAX_SHARE = 0.55    # hard cap: a very narrow window must still show some scene
+
+
+def _panel_width(content_width: int, font_size: int) -> int:
+    """Panel width in px for a window `content_width` px wide at theme `font_size` px."""
+    low = int(round(PANEL_MIN_EM * font_size))
+    high = int(round(PANEL_MAX_EM * font_size))
+    width = max(low, min(high, int(round(content_width * PANEL_FRACTION))))
+    width = min(width, max(int(content_width * PANEL_MAX_SHARE), 1))
+    return max(1, min(width, max(content_width - 1, 1)))
+
+
+def _split_frame(x: int, y: int, width: int, height: int,
+                 font_size: int) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
+    """Split a window rect into (scene, panel) rects as (x, y, w, h).
+
+    Pure arithmetic on purpose: the GUI cannot be clicked from a test, but this can be called with
+    any synthetic window size to prove that neither frame ever comes out zero or negative.
+    """
+    panel_w = _panel_width(width, font_size)
+    scene_w = max(width - panel_w, 1)
+    height = max(height, 1)
+    return (x, y, scene_w, height), (x + scene_w, y, panel_w, height)
+
+
+# ---------------------------------------------------------------- fonts
+
+# Points, not pixels: Open3D multiplies a font's point size by the window's DPI scaling, so a
+# 17-point heading keeps its 1.06x ratio to the 16-point body font on a 100% and a 200% display
+# alike. Sizes must be registered before the first window exists (the atlas is built there).
+_HEADING_POINTS = 17
+_SMALL_POINTS = 13
+# Glyphs outside Latin-1 that the panel may use. Open3D only rasterises the ranges it is told about.
+_EXTRA_CODE_POINTS = [0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2192, 0x25A0]
+_SEMIBOLD_FILES = ("seguisb.ttf", "segoeuib.ttf", "arialbd.ttf", "DejaVuSans-Bold.ttf")
+
+
+def _semibold_font_path(regular: str) -> str:
+    """A heavier face from the same font directory as `regular`, for section headings. Falls back to
+    the regular face, so a machine without Segoe UI Semibold just gets a slightly larger heading."""
+    directory = Path(regular).parent
+    for name in _SEMIBOLD_FILES:
+        candidate = directory / name
+        if candidate.exists():
+            return str(candidate)
+    return regular
+
+
+def _register_fonts() -> dict[str, int]:
+    """Segoe UI (so æ/ø/å render) plus a heading and a small size, as {name: font id}.
+
+    Returns {} when no TTF is available or Open3D refuses the file; callers then fall back to
+    DEFAULT_FONT_ID and the panel simply has one text size instead of three.
+    """
+    app = gui.Application.instance
+    path = T.o3d_font_path()
+    if not path:
+        return {}
+    ids: dict[str, int] = {}
+    try:
+        base = gui.FontDescription(path)
+        try:
+            base.add_typeface_for_code_points(path, _EXTRA_CODE_POINTS)
+        except Exception:  # noqa: BLE001 - extra glyphs are a nicety, the base font is not
+            pass
+        app.set_font(gui.Application.DEFAULT_FONT_ID, base)
+        ids["heading"] = app.add_font(
+            gui.FontDescription(_semibold_font_path(path), point_size=_HEADING_POINTS))
+        ids["small"] = app.add_font(gui.FontDescription(path, point_size=_SMALL_POINTS))
+    except Exception:  # noqa: BLE001 - never let a font problem stop the viewer from opening
+        return ids
+    return ids
+
+
 class PlacementViewer:
     def __init__(self, bin_type: str = "4-hjuls container") -> None:
         self.scans = [s for s in pipeline.list_scans() if pipeline.is_prepared(s)]
@@ -453,103 +616,36 @@ class PlacementViewer:
         self._ours_name = "mesh"   # geometry name our own reconstruction was added under
 
         gui.Application.instance.initialize()
+        # Fonts must be registered between initialize() and the first create_window(): Open3D builds
+        # its glyph atlas when the window is created and cannot grow it afterwards.
+        self._fonts = _register_fonts()
         self.window = gui.Application.instance.create_window("Søppelrom 3D — plassering & skyve-sti", 1500, 950)
-        em = self.window.theme.font_size
+        window = self.window
 
         self.scene = gui.SceneWidget()
-        self.scene.scene = rendering.Open3DScene(self.window.renderer)
+        self.scene.scene = rendering.Open3DScene(window.renderer)
+        self.scene.scene.set_background(T.rgba("scene_bg"))  # "nothing scanned here", not black
         self.scene.set_view_controls(gui.SceneWidget.Controls.ROTATE_CAMERA)
         self.scene.set_on_key(self._on_key)
         self.scene.set_on_mouse(self._on_mouse)  # custom turntable orbit, like the annotation tool
-        self.window.add_child(self.scene)
+        window.add_child(self.scene)
 
         self._cor = np.zeros(3)   # centre of rotation (level-horizon turntable)
         self.orbit: dict | None = None
         self.pan: dict | None = None
 
-        self.panel = gui.Vert(0.4 * em, gui.Margins(0.6 * em, 0.6 * em, 0.6 * em, 0.6 * em))
-        self.scan_label = gui.Label("")
-        self.panel.add_child(self.scan_label)
-
-        nav = gui.Horiz(0.4 * em)
-        prev_btn = gui.Button("< Forrige")
-        prev_btn.set_on_clicked(lambda: self._step(-1))
-        next_btn = gui.Button("Neste >")
-        next_btn.set_on_clicked(lambda: self._step(1))
-        nav.add_child(prev_btn)
-        nav.add_child(next_btn)
-        self.panel.add_child(nav)
-
-        self.panel.add_child(gui.Label("Kassetype:"))
-        self.type_combo = gui.Combobox()
-        for name in BIN_TYPES:
-            self.type_combo.add_item(name)
-        self.type_combo.selected_text = self.bin_type
-        self.type_combo.set_on_selection_changed(lambda text, _index: self._set_type(text))
-        self.panel.add_child(self.type_combo)
-
-        self.anim_check = gui.Checkbox("Animer henting")
-        self.anim_check.checked = True
-        self.panel.add_child(self.anim_check)
-        self.pause_check = gui.Checkbox("Pause renovatør")
-        self.panel.add_child(self.pause_check)
-        self.follow_check = gui.Checkbox("Følgekamera")
-        self.panel.add_child(self.follow_check)
-        self.panel.add_child(gui.Label("Avspillingsfart:"))
-        self.speed_slider = gui.Slider(gui.Slider.DOUBLE)
-        self.speed_slider.set_limits(0.25, 4.0)
-        self.speed_slider.double_value = 1.0
-        self.panel.add_child(self.speed_slider)
-        self.clock_label = gui.Label("⏱ 0:00")
-        self.panel.add_child(self.clock_label)
-
-        self.panel.add_child(gui.Label("Bakgrunn:"))
-        self.backdrop_label = gui.Label("")
-        self.panel.add_child(self.backdrop_label)
-        self.polycam_check = gui.Checkbox("Polycam-sky (B)")
-        self.polycam_check.checked = True
-        self.polycam_check.set_on_checked(self._set_polycam)
-        self.panel.add_child(self.polycam_check)
-        # off by default: a point cloud has no backfaces to cull, so an uncropped Polycam cloud
-        # hides the floor overlays and the bins from the camera this viewer opens with (above the
-        # room). Checking this shows the full height, ceiling and all.
-        self.ceiling_check = gui.Checkbox("Full høyde (m/ himling)")
-        self.ceiling_check.set_on_checked(lambda _v: self._apply_backdrop())
-        self.panel.add_child(self.ceiling_check)
-
-        self.panel.add_child(gui.Label("Vis:"))
-        self.ground_check = gui.Checkbox("Gulv (ledig/opptatt/rot)")
-        self.ground_check.checked = True
-        self.ground_check.set_on_checked(lambda v: self._set_visible("overlay_ground", v and not self.heat_check.checked))
-        self.panel.add_child(self.ground_check)
-        self.path_check = gui.Checkbox("Skyve-sti (blå)")
-        self.path_check.checked = True
-        self.path_check.set_on_checked(lambda v: self._set_visible("overlay_path", v))
-        self.panel.add_child(self.path_check)
-        self.cand_check = gui.Checkbox("Forslag (blå kasser)")
-        self.cand_check.checked = True
-        self.cand_check.set_on_checked(self._toggle_cands)
-        self.panel.add_child(self.cand_check)
-        self.heat_check = gui.Checkbox("Gåtid-varmekart")
-        self.heat_check.set_on_checked(self._toggle_heat)
-        self.panel.add_child(self.heat_check)
-
-        self.stats_label = gui.Label("")
-        self.panel.add_child(self.stats_label)
-        self.panel.add_child(gui.Label(
-            "\nBlått gulv = skyve-sti\n"
-            "Grønt gulv = ledig plass\n"
-            "Rødt gulv = opptatt\n"
-            "Oransje gulv = rot (ikke kasser)\n"
-            "Blå kasse (glass) = forslag\n"
-            "Grå/grønn kasse = eksisterende\n"
-            "Rosa kule = inngang\n"
-        ))
-        self.panel.add_child(gui.Label("Dra = roter · scroll = zoom\nPil venstre/høyre = bytt skann\n"
-                                       "B = bytt mellom Polycam-sky og egen"))
-
-        self.window.add_child(self.panel)
-        self.window.set_on_layout(self._on_layout)
+        # ScrollableVert, not Vert: the old panel laid its controls out past the bottom of a small
+        # window and the last checkboxes were simply unreachable. Now they scroll.
+        self.panel = gui.ScrollableVert(T.emf(window, 0.3), T.margins(window, 0.6))
+        self.panel.background_color = T.gui_color("panel_bg")
+        self._build_scan_section()
+        self._build_view_section()
+        self._build_backdrop_section()
+        self._build_round_section()
+        self._build_legend_section()
+        self._build_help_section()
+        window.add_child(self.panel)
+        window.set_on_layout(self._on_layout)
 
         self._anim: dict | None = None
         self._leg_idx = 0
@@ -567,13 +663,211 @@ class PlacementViewer:
         self.window.set_on_tick_event(self._tick)
         self._load()
 
+    # ---------- panel widgets (every size in em, so the panel follows font size / DPI) ----------
+
+    def _font(self, step: str = "body") -> int:
+        """Font id for 'heading' / 'small'; the theme default for anything else (incl. failure)."""
+        return self._fonts.get(step, gui.Application.DEFAULT_FONT_ID)
+
+    def _label(self, text: str, role: str = "text", step: str = "body") -> gui.Label:
+        label = gui.Label(text)
+        label.text_color = T.gui_color(role)
+        label.font_id = self._font(step)
+        return label
+
+    def _section(self, title: str, expanded: bool = True) -> gui.CollapsableVert:
+        """A labelled, foldable group added to the panel. Folding is the escape valve on a short
+        window: the user hides what they are not using instead of hunting for a clipped control."""
+        section = gui.CollapsableVert(title, T.emf(self.window, 0.3),
+                                      T.margins(self.window, left=0.7, top=0.15, bottom=0.25))
+        section.font_id = self._font("heading")
+        section.set_is_open(expanded)
+        self.panel.add_child(section)
+        return section
+
+    def _button(self, text: str, on_clicked, tooltip: str = "", primary: bool = False) -> gui.Button:
+        button = gui.Button(text)
+        # padding in em (Open3D's own unit for buttons) — the button grows with the font, so a row of
+        # buttons keeps the same proportion of the panel width at any DPI
+        button.horizontal_padding_em = 0.7
+        button.vertical_padding_em = 0.3
+        button.background_color = T.gui_color("accent" if primary else "panel_bg_alt")
+        button.set_on_clicked(on_clicked)
+        if tooltip:
+            button.tooltip = tooltip
+        return button
+
+    def _checkbox(self, text: str, checked: bool = False, on_checked=None,
+                  tooltip: str = "") -> gui.Checkbox:
+        box = gui.Checkbox(text)
+        box.checked = checked
+        if on_checked is not None:
+            box.set_on_checked(on_checked)
+        if tooltip:
+            box.tooltip = tooltip
+        return box
+
+    def _swatch(self, role: str):
+        """A solid colour chip for the legend, sized in em.
+
+        An ImageWidget is used because Open3D only actually paints background_color for a few widget
+        types (a Label's is ignored), and a chip must show the EXACT semantic colour — describing it
+        in words is what let the old legend claim "oransje" while the scene drew amber.
+        """
+        side = T.em(self.window, 0.85)
+        try:
+            pixels = np.empty((side, side, 3), dtype=np.uint8)
+            pixels[:] = np.array(T.rgb255_of(role), dtype=np.uint8)
+            return gui.ImageWidget(o3d.geometry.Image(pixels))
+        except Exception:  # noqa: BLE001 - fall back to a coloured square glyph
+            return self._label("■", role, "small")
+
+    def _legend_row(self, parent: gui.Widget, role: str, text: str) -> None:
+        row = gui.Horiz(T.emf(self.window, 0.5))
+        row.add_child(self._swatch(role))
+        row.add_child(self._label(text, "text_muted", "small"))
+        row.add_stretch()
+        parent.add_child(row)
+
+    def _wrap(self, text: str, chars: int = 0) -> str:
+        """Hard-wrap text: Open3D labels never wrap, they just run out of the panel.
+
+        The default width is what the narrowest panel can show — Segoe UI averages about half an em
+        per character, and the panel's inner width is PANEL_MIN_EM minus the margins.
+        """
+        width = chars or max(16, int((PANEL_MIN_EM - 2.4) * 1.9))
+        return "\n".join(textwrap.fill(line, width) if line.strip() else line
+                         for line in str(text).splitlines())
+
+    # ---------- panel sections ----------
+
+    def _build_scan_section(self) -> None:
+        section = self._section("Skann")
+        self.scan_pos_label = self._label("", "text_muted", "small")
+        section.add_child(self.scan_pos_label)
+        self.scan_label = self._label("", "text", "heading")
+        section.add_child(self.scan_label)
+
+        nav = gui.Horiz(T.emf(self.window, 0.4))
+        nav.add_child(self._button("< Forrige", lambda: self._step(-1),
+                                   "Forrige skann (pil venstre)", primary=True))
+        nav.add_child(self._button("Neste >", lambda: self._step(1),
+                                   "Neste skann (pil høyre)", primary=True))
+        nav.add_stretch()   # buttons keep their size, the leftover width stays empty
+        section.add_child(nav)
+
+        self.type_combo = gui.Combobox()
+        for name in BIN_TYPES:
+            self.type_combo.add_item(name)
+        self.type_combo.selected_text = self.bin_type
+        self.type_combo.set_on_selection_changed(lambda text, _index: self._set_type(text))
+        # label and field on one line, and the field kept at its natural width by the trailing
+        # stretch — full-width would push its dropdown arrow to the far edge of the panel
+        type_row = gui.Horiz(T.emf(self.window, 0.4))
+        type_row.add_child(self._label("Kassetype", "text_muted", "small"))
+        type_row.add_child(self.type_combo)
+        type_row.add_stretch()
+        section.add_child(type_row)
+
+        self.stats_label = self._label("", "text", "body")
+        section.add_child(self.stats_label)
+
+    def _build_view_section(self) -> None:
+        section = self._section("Visning")
+        self.ground_check = self._checkbox(
+            "Gulv (ledig/opptatt/rot)", True,
+            lambda v: self._set_visible("overlay_ground", v and not self.heat_check.checked),
+            "Grønt = ledig, rødt = opptatt, gult = rot")
+        section.add_child(self.ground_check)
+        self.path_check = self._checkbox(
+            "Skyve-sti (blå)", True, lambda v: self._set_visible("overlay_path", v),
+            "Korridoren en stor kasse kan trilles langs til inngangen")
+        section.add_child(self.path_check)
+        self.cand_check = self._checkbox(
+            "Forslag (grønne kasser)", True, self._toggle_cands,
+            "Gjennomsiktige grønne kasser = foreslåtte nye plasser")
+        section.add_child(self.cand_check)
+        self.heat_check = self._checkbox(
+            "Gåtid-varmekart", False, self._toggle_heat,
+            "Gangtid fra inngangen for hver ledige gulvcelle (erstatter gulvlaget)")
+        section.add_child(self.heat_check)
+
+    def _build_backdrop_section(self) -> None:
+        section = self._section("Bakgrunn")
+        self.polycam_check = self._checkbox("Polycam-sky (B)", True, self._set_polycam,
+                                            "Bytt mellom Polycam-eksporten og egen rekonstruksjon")
+        section.add_child(self.polycam_check)
+        # off by default: a point cloud has no backfaces to cull, so an uncropped Polycam cloud
+        # hides the floor overlays and the bins from the camera this viewer opens with (above the
+        # room). Checking this shows the full height, ceiling and all.
+        self.ceiling_check = self._checkbox("Full høyde (m/ himling)", False,
+                                            lambda _v: self._apply_backdrop(),
+                                            "Uten denne kuttes skyen 2 m over gulvet")
+        section.add_child(self.ceiling_check)
+        self.backdrop_label = self._label("", "text_muted", "small")
+        section.add_child(self.backdrop_label)
+
+    def _build_round_section(self) -> None:
+        section = self._section("Henterunde")
+        self.anim_check = self._checkbox("Animer henting", True, None,
+                                         "Renovatøren triller kassene ut til bilen og tilbake")
+        section.add_child(self.anim_check)
+        self.pause_check = self._checkbox("Pause renovatør")
+        section.add_child(self.pause_check)
+        self.follow_check = self._checkbox("Følgekamera", False, None,
+                                           "Kameraet henger bak renovatøren")
+        section.add_child(self.follow_check)
+        self.speed_slider = gui.Slider(gui.Slider.DOUBLE)
+        self.speed_slider.set_limits(0.25, 4.0)
+        self.speed_slider.double_value = 1.0
+        speed_row = gui.Horiz(T.emf(self.window, 0.4))
+        speed_row.add_child(self._label("Fart", "text_muted", "small"))
+        speed_row.add_child(self.speed_slider)   # takes the leftover width of the row
+        section.add_child(speed_row)
+        self.clock_label = self._label("Tid 0:00", "text", "body")
+        section.add_child(self.clock_label)
+        # what he is doing right now ("går", "triller full kasse (stor)", "tømmer!") — its own label
+        # so the clock line never has to re-wrap while the animation runs
+        self.motion_label = self._label("", "text_muted", "small")
+        section.add_child(self.motion_label)
+
+    def _build_legend_section(self) -> None:
+        """The colour key. Same roles as the preview PNGs — one colour, one meaning, everywhere.
+
+        Two columns: the whole key then costs four rows instead of seven, which is what lets the rest
+        of the panel fit without scrolling on a normal window. The longest label needs ~118 px and the
+        narrowest column is (20 em - margins) / 2 ≈ 139 px, so it still fits at the minimum width.
+        """
+        section = self._section("Tegnforklaring")
+        grid = gui.VGrid(2, T.emf(self.window, 0.35))
+        for role, text in (("free_floor", "Ledig gulv"),
+                           ("occupied_floor", "Opptatt gulv"),
+                           ("warning", "Rot på gulvet"),
+                           ("path", "Skyve-sti"),
+                           ("new_bin", "Forslag: ny kasse"),
+                           ("existing_bin", "Eksisterende kasse"),
+                           ("entrance", "Inngang")):
+            self._legend_row(grid, role, text)
+        section.add_child(grid)
+
+    def _build_help_section(self) -> None:
+        section = self._section("Taster og mus", expanded=False)
+        section.add_child(self._label(
+            "Dra = roter\n"
+            "Høyreklikk + dra = panorer\n"
+            "Scroll = zoom\n"
+            "Pil venstre/høyre = bytt skann\n"
+            "B = bytt bakgrunn (Polycam / egen)",
+            "text_muted", "small"))
+
     # ---------- layout / navigation ----------
 
     def _on_layout(self, _ctx) -> None:
         rect = self.window.content_rect
-        panel_width = 19 * self.window.theme.font_size
-        self.scene.frame = gui.Rect(rect.x, rect.y, rect.width - panel_width, rect.height)
-        self.panel.frame = gui.Rect(rect.get_right() - panel_width, rect.y, panel_width, rect.height)
+        scene_rect, panel_rect = _split_frame(rect.x, rect.y, rect.width, rect.height,
+                                              self.window.theme.font_size)
+        self.scene.frame = gui.Rect(*scene_rect)
+        self.panel.frame = gui.Rect(*panel_rect)
 
     def _step(self, delta: int) -> None:
         self.index = (self.index + delta) % len(self.scans)
@@ -613,8 +907,15 @@ class PlacementViewer:
         self._set_visible(self._ours_name, not polycam)
         self._set_visible("polycam", polycam and self.ceiling_check.checked)
         self._set_visible("polycam_low", polycam and not self.ceiling_check.checked)
-        self.backdrop_label.text = (backdrop.status_text(choice, polycam)
+        # backdrop.status_text() owns the wording (and the p90 / overlap / sharpness reading); we
+        # only fold its lines to the panel width, since an Open3D label would run off the edge.
+        self.backdrop_label.text = (self._wrap(backdrop.status_text(choice, polycam))
                                     if choice is not None else "")
+        # amber only when Polycam is IMPOSSIBLE for this scan (no export, or the gate rejected it);
+        # a cloud the user simply switched off is not a problem worth colouring
+        missing = choice is not None and not choice.available
+        self.backdrop_label.text_color = T.gui_color("warning" if missing else "text_muted")
+        self.window.set_needs_layout()   # the wrapped text can change line count
         self.window.post_redraw()
 
     # ---------- camera: level-horizon turntable orbit + pan (mirrors the annotation tool) ----------
@@ -794,10 +1095,21 @@ class PlacementViewer:
         self._set_visible("overlay_heat", on)
         self._set_visible("overlay_ground", (not on) and self.ground_check.checked)
 
+    def _status(self, text: str, role: str = "text") -> None:
+        """Write the panel's status line, wrapped and coloured by severity.
+
+        set_needs_layout() matters: Open3D sizes a label once, at layout time, so a status that grows
+        from one line to three would have the extra lines clipped without a fresh layout pass.
+        """
+        self.stats_label.text_color = T.gui_color(role)
+        self.stats_label.text = self._wrap(text)
+        self.window.set_needs_layout()
+
     def _load(self) -> None:
         stem = self.scans[self.index]
-        self.scan_label.text = f"Skann {self.index + 1}/{len(self.scans)}:\n{stem}"
-        self.stats_label.text = "Beregner … (kan ta et par sekunder)"
+        self.scan_pos_label.text = f"Skann {self.index + 1} av {len(self.scans)}"
+        self.scan_label.text = self._wrap(stem, chars=24)
+        self._status("Beregner … (kan ta et par sekunder)", "text_muted")
         try:
             scene = pipeline.compute_scene(stem, self.bin_type)
         except Exception as error:  # noqa: BLE001 - surface any failure in the panel
@@ -805,7 +1117,7 @@ class PlacementViewer:
             self._anim = None  # stop the walker from re-adding itself to the cleared scene
             self._backdrop = None
             self.backdrop_label.text = ""
-            self.stats_label.text = f"Feil: {error}"
+            self._status(f"Feil: {error}", "danger")
             self.window.post_redraw()
             return
         self._render(scene)
@@ -859,14 +1171,23 @@ class PlacementViewer:
         floor = scene.floor_height
         bin_mat = rendering.MaterialRecord()
         bin_mat.shader = "defaultLit"
+        # A red wireframe around every existing bin. The bin bodies are painted like real Norwegian
+        # bins (grey container / green dunk), which is nice to look at but says nothing — the outline
+        # is what makes "red = kassen står her allerede" read the same as in the preview sheets.
+        edge_mat = rendering.MaterialRecord()
+        edge_mat.shader = "unlitLine"
+        edge_mat.line_width = 2.0
         self._n_exist = len(scene.existing)
         for i, (bx, bz, bl, bw, byaw) in enumerate(scene.existing):
             cls = "stor" if max(bl, bw) >= 1.0 else "liten"
             model = _bin_model_world(bx, bz, bl, bw, byaw, floor, cls)
             self.scene.scene.add_geometry(f"exist_{i}", model, bin_mat)
+            outline = _bin_box_lineset(((bx, bz), (bl, bw), byaw), floor,
+                                       floor + BIN_HEIGHT[cls], EXISTING_EDGE_COLOR)
+            self.scene.scene.add_geometry(f"exist_edge_{i}", outline, edge_mat)
         ghost_mat = rendering.MaterialRecord()
         ghost_mat.shader = "defaultLitTransparency"
-        ghost_mat.base_color = [PROPOSAL_COLOR[0], PROPOSAL_COLOR[1], PROPOSAL_COLOR[2], 0.78]
+        ghost_mat.base_color = [*PROPOSAL_COLOR, 0.72]   # translucent, so the floor reads through
         self._n_cands = len(scene.result.candidates)
         for i, cand in enumerate(scene.result.candidates):
             (ccx, ccz), (rl, rw), ang = cand.rect
@@ -902,11 +1223,11 @@ class PlacementViewer:
                     "sti_truck", _truck_mesh(truck_pos, truck_dir, self._anim["floor"]), truck_mat)
 
         if scene.enclosed:
-            self.stats_label.text = "⚠ INNESPERRET rom (dør lukket i scan) — hoppet over"
+            self._status("OBS: innesperret rom (dør lukket i scan) - hoppet over", "warning")
         else:
-            self.stats_label.text = (
-                f"{len(scene.result.candidates)} nye plasser  ·  {len(scene.existing)} eksisterende\n"
-                f"ledig gulv {scene.fs.free_area_m2:.1f} m²  ·  rot blokkerer {self._clutter_m2:.1f} m²"
+            self._status(
+                f"{len(scene.result.candidates)} nye plasser · {len(scene.existing)} eksisterende\n"
+                f"Ledig gulv {scene.fs.free_area_m2:.1f} m² · rot {self._clutter_m2:.1f} m²"
             )
         self.window.post_redraw()
 
@@ -932,6 +1253,7 @@ class PlacementViewer:
                     self.scene.scene.remove_geometry(name)
                     cleared = True
             self._last_tick = None
+            self.motion_label.text = "" if self._anim is not None else "ingen runde å vise"
             if cleared:
                 self.window.post_redraw()
             return False
@@ -1011,8 +1333,9 @@ class PlacementViewer:
         # the bin he is wheeling vanishes from its parking spot and reappears when returned
         carried = leg.get("bin_idx") if (leg["kind"] == "pause" or leg.get("mode") in ("full", "tom")) else None
         for k in range(self._n_exist):
-            if self.scene.scene.has_geometry(f"exist_{k}"):
-                self.scene.scene.show_geometry(f"exist_{k}", k != carried)
+            for name in (f"exist_{k}", f"exist_edge_{k}"):  # the red outline travels with its bin
+                if self.scene.scene.has_geometry(name):
+                    self.scene.scene.show_geometry(name, k != carried)
 
         if self.follow_check.checked:  # smoothed chase-cam behind the worker
             d2 = _unit2(direction)
@@ -1027,8 +1350,11 @@ class PlacementViewer:
         else:
             self._cam = None
 
+        # two single-line labels, never re-wrapped: a label whose line count changes needs a fresh
+        # layout, and asking for one every frame would relayout the whole window 60 times a second
         seconds = int(self._anim_time)
-        self.clock_label.text = f"⏱ {seconds // 60}:{seconds % 60:02d} · {status}"
+        self.clock_label.text = f"Tid {seconds // 60}:{seconds % 60:02d}"
+        self.motion_label.text = status
         self.window.post_redraw()
         return True
 

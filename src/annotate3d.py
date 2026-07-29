@@ -26,6 +26,14 @@ CAD-style interactions:
   - Ctrl+C / Ctrl+V copy and paste the selected box (the paste lands beside the original).
 
 A background worker process keeps up to 5 scans prepared ahead while you annotate.
+
+PANEL: every size is a multiple of window.theme.font_size (see src/uitheme.py), so the side panel
+and its buttons follow the DPI / font size instead of clipping. The panel is a gui.ScrollableVert
+with collapsible sections, because a plain gui.Vert squeezes its children into each other once the
+content is taller than the window — that is what made the buttons overlap unless the window was
+maximised. Buttons sit in gui.VGrid rows, which split the panel into equal columns, so a long label
+can no longer push a button past the panel edge. Colours come from src/uitheme.py (which derives
+them from src/style.py) so a colour means the same here as in the rendered previews.
 """
 from __future__ import annotations
 
@@ -43,6 +51,7 @@ import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
 
 from . import backdrop
+from . import uitheme as T
 from .annotations import (
     BIN_TYPES,
     BOX_EDGES,
@@ -55,16 +64,21 @@ from .annotations import (
 from .prepare_scan import ANNOTATION_DIR, CACHE_ROOT, PROJECT_ROOT, RAW_DIR, is_prepared
 from .set_entrance import ENTRANCE_DIR, load_entrances
 
+# Box colours come from the shared palette (src/uitheme.py -> src/style.py) so that a colour means
+# the same thing here, in place3d.py and in the rendered PNG previews. The MEANINGS are unchanged:
+# oransje/gul = forslag, grønn = godkjent, blå = valgt.
 STATUS_COLORS = {
-    STATUS_PROPOSED: (1.0, 0.55, 0.05),
-    STATUS_APPROVED: (0.1, 0.85, 0.2),
+    STATUS_PROPOSED: T.rgb_of("warning"),
+    STATUS_APPROVED: T.rgb_of("new_bin"),
 }
-SELECTED_COLOR = (0.2, 0.5, 1.0)
+SELECTED_COLOR = T.rgb_of("path")
+# All four palette hues are spoken for (grønn/rød/blå/magenta), so the "drawing right now" line
+# keeps a cyan of its own. It only exists between two clicks, never next to a saved box.
 PREVIEW_COLOR = (0.1, 0.9, 0.9)
 HANDLE_COLORS = {
-    "corner": (1.0, 0.85, 0.1),
-    "top": (0.2, 0.6, 1.0),
-    "rotate": (1.0, 0.2, 0.8),
+    "corner": T.rgb_of("dimension"),   # gult = størrelse, as the help text says
+    "top": T.rgb_of("path"),           # blått = høyde
+    "rotate": T.rgb_of("entrance"),    # rosa = roter
 }
 CORNER_SIGNS = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
 HANDLE_NAMES = [f"handle_corner_{i}" for i in range(4)] + ["handle_top", "handle_rotate"]
@@ -73,6 +87,15 @@ MODE_NORMAL = "normal"
 MODE_DRAW = "draw"
 MODE_ENTRANCE = "entrance"
 MODE_PLACE = "place"
+
+# Name + palette role per mode. The mode decides what the next click does, so it gets a coloured
+# chip in the panel instead of hiding in a line of grey text.
+MODE_STYLE: dict[str, tuple[str, str]] = {
+    MODE_NORMAL: ("Rediger", "text_muted"),
+    MODE_DRAW: ("Tegner boks", "dimension"),
+    MODE_PLACE: ("Plasserer boks", "path"),
+    MODE_ENTRANCE: ("Setter inngang", "entrance"),
+}
 
 
 def _estimate_floor(mesh: o3d.geometry.TriangleMesh) -> float:
@@ -133,7 +156,7 @@ def _ray_hits_box(ray: tuple[np.ndarray, np.ndarray], box: BinBox) -> float | No
 
 
 class AnnotationApp:
-    def __init__(self) -> None:
+    def __init__(self, width: int = 1500, height: int = 950) -> None:
         self.scans = sorted(RAW_DIR.glob("*.zip"))
         if not self.scans:
             raise SystemExit(f"no scans found in {RAW_DIR}")
@@ -177,130 +200,19 @@ class AnnotationApp:
         self._last_cull_time = 0.0
 
         gui.Application.instance.initialize()
-        self.window = gui.Application.instance.create_window("Søppelrom 3D-annotering", 1500, 950)
-        em = self.window.theme.font_size
+        self.window = gui.Application.instance.create_window(
+            "Søppelrom 3D-annotering", int(width), int(height)
+        )
 
         self.scene = gui.SceneWidget()
         self.scene.scene = rendering.Open3DScene(self.window.renderer)
+        self.scene.scene.set_background(T.rgba("scene_bg"))
         self.scene.set_view_controls(gui.SceneWidget.Controls.ROTATE_CAMERA)
         self.scene.set_on_mouse(self._on_mouse)
         self.scene.set_on_key(self._on_key)
         self.window.add_child(self.scene)
 
-        self.panel = gui.Vert(0.4 * em, gui.Margins(0.6 * em, 0.6 * em, 0.6 * em, 0.6 * em))
-
-        self.scan_label = gui.Label("")
-        self.panel.add_child(self.scan_label)
-        nav = gui.Horiz(0.4 * em)
-        prev_btn = gui.Button("< Forrige")
-        prev_btn.set_on_clicked(lambda: self._switch_scan(-1))
-        next_btn = gui.Button("Neste >")
-        next_btn.set_on_clicked(lambda: self._switch_scan(1))
-        nav.add_child(prev_btn)
-        nav.add_child(next_btn)
-        self.panel.add_child(nav)
-
-        self.status_label = gui.Label("")
-        self.panel.add_child(self.status_label)
-        self.panel.add_child(gui.Label("Bokser:"))
-
-        self.box_list = gui.ListView()
-        self.box_list.set_on_selection_changed(self._on_list_selection)
-        self.panel.add_child(self.box_list)
-
-        act = gui.Horiz(0.4 * em)
-        approve_btn = gui.Button("Godkjenn")
-        approve_btn.set_on_clicked(self._approve_selected)
-        delete_btn = gui.Button("Slett")
-        delete_btn.set_on_clicked(self._delete_selected)
-        undo_btn = gui.Button("Angre")
-        undo_btn.set_on_clicked(self._undo)
-        act.add_child(approve_btn)
-        act.add_child(delete_btn)
-        act.add_child(undo_btn)
-        self.panel.add_child(act)
-
-        self.panel.add_child(gui.Label("Kassetype:"))
-        self.type_combo = gui.Combobox()
-        for name in BIN_TYPES:
-            self.type_combo.add_item(name)
-        self.panel.add_child(self.type_combo)
-
-        new_row = gui.Horiz(0.4 * em)
-        draw_btn = gui.Button("Tegn boks")
-        draw_btn.set_on_clicked(self._start_draw)
-        quick_btn = gui.Button("Plasser boks av/på")
-        quick_btn.set_on_clicked(self._toggle_place)
-        retype_btn = gui.Button("Sett type")
-        retype_btn.set_on_clicked(self._retype_selected)
-        new_row.add_child(draw_btn)
-        new_row.add_child(quick_btn)
-        new_row.add_child(retype_btn)
-        self.panel.add_child(new_row)
-
-        entrance_row = gui.Horiz(0.4 * em)
-        entrance_btn = gui.Button("Inngang av/på")
-        entrance_btn.set_on_clicked(self._toggle_entrance_mode)
-        entrance_clear = gui.Button("Nullstill innganger")
-        entrance_clear.set_on_clicked(self._clear_entrances)
-        entrance_row.add_child(entrance_btn)
-        entrance_row.add_child(entrance_clear)
-        self.panel.add_child(entrance_row)
-
-        self.mode_label = gui.Label("")
-        self.panel.add_child(self.mode_label)
-
-        self.backdrop_label = gui.Label("")
-        self.panel.add_child(self.backdrop_label)
-        self.polycam_check = gui.Checkbox("Polycam-sky (B)")
-        self.polycam_check.checked = True
-        self.polycam_check.set_on_checked(self._set_polycam)
-        self.panel.add_child(self.polycam_check)
-
-        self.cull_checkbox = gui.Checkbox("Skjul veggbaksider / himling")
-        self.cull_checkbox.checked = True
-        self.cull_checkbox.set_on_checked(self._on_cull_changed)
-        self.panel.add_child(self.cull_checkbox)
-
-        self.panel.add_child(gui.Label("Finjuster valgt (5 cm / 5°):"))
-        move_grid = gui.VGrid(4, 0.3 * em)
-        for text, fn in [
-            ("X-", lambda: self._nudge(dx=-0.05)), ("X+", lambda: self._nudge(dx=0.05)),
-            ("Z-", lambda: self._nudge(dz=-0.05)), ("Z+", lambda: self._nudge(dz=0.05)),
-            ("Rot-", lambda: self._nudge(dyaw=-5.0)), ("Rot+", lambda: self._nudge(dyaw=5.0)),
-            ("H-", lambda: self._nudge(dey=-0.05)), ("H+", lambda: self._nudge(dey=0.05)),
-            ("L-", lambda: self._nudge(dex=-0.05)), ("L+", lambda: self._nudge(dex=0.05)),
-            ("B-", lambda: self._nudge(dez=-0.05)), ("B+", lambda: self._nudge(dez=0.05)),
-        ]:
-            button = gui.Button(text)
-            button.set_on_clicked(fn)
-            move_grid.add_child(button)
-        self.panel.add_child(move_grid)
-
-        save_btn = gui.Button("Lagre (auto ved bytte)")
-        save_btn.set_on_clicked(self._save)
-        self.panel.add_child(save_btn)
-
-        self.help_label = gui.Label(
-            "Venstre-dra: orbit. Høyre-dra: pan.\n"
-            "Plasser boks (P): klikk på gulvet\n"
-            "  (ferdig størrelse). Hold R + flytt\n"
-            "  musa for å rotere. P/ESC avslutter.\n"
-            "Tegn boks (T, starter i topdown):\n"
-            "  klikk A, klikk B, trykk+dra opp, slipp.\n"
-            "Klikk på boks: velg. Håndtak: gult =\n"
-            "  størrelse, blå = høyde, rosa = roter.\n"
-            "Tastatur (valgt boks):\n"
-            "  Del = slett, G = godkjenn\n"
-            "  Piltaster = flytt, Q/E = roter\n"
-            "  PgUp/PgDn = høyde, 1-4 = type\n"
-            "  Ctrl+C/V = kopier/lim boks\n"
-            "  Ctrl+Z = angre, Ctrl+S = lagre\n"
-            "B = Polycam-sky / egen bakgrunn\n"
-            "Ctrl+klikk: flytt valgt hit. ESC: avbryt.\n"
-            "Oransje = forslag, grønn = godkjent,\nblå = valgt"
-        )
-        self.panel.add_child(self.help_label)
+        self._build_panel()
 
         self.window.add_child(self.panel)
         self.window.set_on_layout(self._on_layout)
@@ -311,13 +223,249 @@ class AnnotationApp:
         self.worker = start_background_worker()
         self._load_scan()
 
+    # ---------- panel widgets (every size in em, so the panel follows DPI / font size) ----------
+
+    def _text(self, text: str, role: str = "text") -> gui.Label:
+        label = gui.Label(text)
+        label.text_color = T.gui_color(role)
+        return label
+
+    def _section(self, title: str, *, expanded: bool = True) -> gui.CollapsableVert:
+        """A collapsible group. Collapsing is what keeps the long help text from pushing the
+        buttons out of sight on a short window."""
+        section = gui.CollapsableVert(
+            title,
+            T.emf(self.window, 0.3),
+            T.margins(self.window, left=0.7, top=0.15, right=0.1, bottom=0.4),
+        )
+        section.set_is_open(expanded)
+        return section
+
+    def _button(self, text: str, callback, tooltip: str = "", role: str | None = None) -> gui.Button:
+        button = gui.Button(text)
+        # padding in em as well: a fixed pixel padding is exactly what clipped the labels at 150%
+        button.horizontal_padding_em = 0.4
+        button.vertical_padding_em = 0.3
+        button.set_on_clicked(callback)
+        if tooltip:
+            button.tooltip = tooltip
+        if role is not None:
+            button.background_color = T.gui_color(role)
+        return button
+
+    def _grid(self, columns: int) -> gui.VGrid:
+        """Buttons go in a VGrid, never a Horiz: the grid splits the panel into equal columns and
+        gives every child exactly one column, so a button can no longer overflow the panel edge
+        (which is what the old Horiz rows did — they kept their preferred width and overlapped)."""
+        return gui.VGrid(columns, T.emf(self.window, 0.3))
+
+    def _gap(self, factor: float = 0.5) -> None:
+        """Vertical breathing room between blocks. Colour cannot do this job: only ScrollableVert
+        and Button paint background_color in Open3D 0.19 (verified), so a Vert 'card' with its own
+        surface colour is not available — spacing and type carry the hierarchy instead."""
+        self.panel.add_fixed(T.emf(self.window, factor))
+
+    def _legend_row(self, role: str, text: str) -> gui.Label:
+        """Legend entry. The colour itself is the swatch: there is no paintable rectangle widget,
+        and a block glyph would risk a missing character in Open3D's built-in font."""
+        return self._text(text, role)
+
+    def _build_panel(self) -> None:
+        # ScrollableVert: a long panel now scrolls instead of squeezing its children into each
+        # other. In a plain Vert, content taller than the window made the rows overlap, which is
+        # exactly why the buttons were unreachable unless the window was maximised.
+        self.panel = gui.ScrollableVert(T.emf(self.window, 0.35), T.margins(self.window, 0.6))
+        self.panel.background_color = T.gui_color("panel_bg")
+
+        # -- header: which scan, and how to move between them ------------------------------
+        self._scan_counter = self._text("", "text_muted")
+        self.panel.add_child(self._scan_counter)
+        self.scan_label = self._text("", "text")
+        self.panel.add_child(self.scan_label)
+        nav = self._grid(2)
+        nav.add_child(self._button("< Forrige", lambda: self._switch_scan(-1),
+                                   "Forrige skann (lagrer først)"))
+        nav.add_child(self._button("Neste >", lambda: self._switch_scan(1),
+                                   "Neste skann (lagrer først)"))
+        self.panel.add_child(nav)
+        self._gap(0.6)
+
+        # -- mode line: what the next click will do -----------------------------------------
+        self._mode_name = self._text("", "text_muted")
+        self.panel.add_child(self._mode_name)
+        self.mode_label = self._text("", "text_muted")
+        self.panel.add_child(self.mode_label)
+        self._gap(0.3)
+        self.status_label = self._text("", "text_muted")
+        self.panel.add_child(self.status_label)
+        self._gap(0.3)
+
+        # -- boxes ---------------------------------------------------------------------------
+        boxes = self._section("Bokser")
+        self.box_list = gui.ListView()
+        # Bounded height: an unbounded ListView claims a huge preferred height and would push the
+        # buttons below the fold again. 8 rows fit even a 700 px tall window; longer lists scroll.
+        self.box_list.set_max_visible_items(8)
+        self.box_list.set_on_selection_changed(self._on_list_selection)
+        boxes.add_child(self.box_list)
+
+        approve_row = self._grid(2)
+        approve_row.add_child(self._button("Godkjenn (G)", self._approve_selected,
+                                           "Marker valgt boks som godkjent", "accent"))
+        approve_row.add_child(self._button("Slett (Del)", self._delete_selected,
+                                           "Slett valgt boks"))
+        boxes.add_child(approve_row)
+
+        edit_row = self._grid(2)
+        edit_row.add_child(self._button("Angre (Ctrl+Z)", self._undo, "Angre siste endring"))
+        edit_row.add_child(self._button("Lagre (Ctrl+S)", self._save,
+                                        "Lagre nå (skjer også automatisk ved skannbytte)"))
+        boxes.add_child(edit_row)
+
+        boxes.add_child(self._text("Kassetype", "text_muted"))
+        self.type_combo = gui.Combobox()
+        for name in BIN_TYPES:
+            self.type_combo.add_item(name)
+        # in a Horiz with a stretch the combobox keeps its natural width, so the drop-down arrow
+        # stays next to the text instead of being flung out to the panel edge
+        combo_row = gui.Horiz(0)
+        combo_row.add_child(self.type_combo)
+        combo_row.add_stretch()
+        boxes.add_child(combo_row)
+
+        new_row = self._grid(2)
+        new_row.add_child(self._button("Tegn boks (T)", self._start_draw,
+                                       "Tegn en boks fra to gulvpunkter + høyde"))
+        new_row.add_child(self._button("Plasser (P)", self._toggle_place,
+                                       "Plasser boks av/på: klikk på gulvet for ferdig størrelse"))
+        boxes.add_child(new_row)
+        type_row = self._grid(2)
+        type_row.add_child(self._button("Sett type", self._retype_selected,
+                                        "Gi valgt boks kassetypen over (eller 1-4)"))
+        type_row.add_child(self._text("", "text_muted"))   # keeps the button one column wide
+        boxes.add_child(type_row)
+        self.panel.add_child(boxes)
+
+        # -- nudge the selected box ----------------------------------------------------------
+        nudge = self._section("Finjuster valgt")
+        nudge.add_child(self._text("5 cm / 5° per klikk\nH = høyde, L = lengde, B = bredde",
+                                   "text_muted"))
+        move_grid = self._grid(4)
+        for text, fn in [
+            ("X-", lambda: self._nudge(dx=-0.05)), ("X+", lambda: self._nudge(dx=0.05)),
+            ("Z-", lambda: self._nudge(dz=-0.05)), ("Z+", lambda: self._nudge(dz=0.05)),
+            ("Rot-", lambda: self._nudge(dyaw=-5.0)), ("Rot+", lambda: self._nudge(dyaw=5.0)),
+            ("H-", lambda: self._nudge(dey=-0.05)), ("H+", lambda: self._nudge(dey=0.05)),
+            ("L-", lambda: self._nudge(dex=-0.05)), ("L+", lambda: self._nudge(dex=0.05)),
+            ("B-", lambda: self._nudge(dez=-0.05)), ("B+", lambda: self._nudge(dez=0.05)),
+        ]:
+            move_grid.add_child(self._button(text, fn))
+        nudge.add_child(move_grid)
+        self.panel.add_child(nudge)
+
+        # -- entrances -----------------------------------------------------------------------
+        entrance = self._section("Inngang")
+        entrance_row = self._grid(2)
+        entrance_row.add_child(self._button("Inngang av/på", self._toggle_entrance_mode,
+                                            "Klikk = ny dør, Ctrl+klikk = slett nærmeste"))
+        entrance_row.add_child(self._button("Nullstill", self._clear_entrances,
+                                            "Fjern alle innganger i dette skannet"))
+        entrance.add_child(entrance_row)
+        self.panel.add_child(entrance)
+
+        # -- view ----------------------------------------------------------------------------
+        view = self._section("Visning")
+        self.polycam_check = gui.Checkbox("Polycam-sky (B)")
+        self.polycam_check.checked = True
+        self.polycam_check.tooltip = ("Vis Polycams egen eksport i stedet for vårt Poisson-mesh. "
+                                      "Kun bakgrunn — geometrien er den samme.")
+        self.polycam_check.set_on_checked(self._set_polycam)
+        view.add_child(self.polycam_check)
+        self.cull_checkbox = gui.Checkbox("Skjul veggbaksider / himling")
+        self.cull_checkbox.checked = True
+        self.cull_checkbox.tooltip = "Dukkehus-visning: se ned i rommet uten tak og bakvegger"
+        self.cull_checkbox.set_on_checked(self._on_cull_changed)
+        view.add_child(self.cull_checkbox)
+        self.backdrop_label = self._text("", "text_muted")
+        view.add_child(self.backdrop_label)
+        self.panel.add_child(view)
+
+        # -- legend: exactly the meanings the PNG previews use -------------------------------
+        legend = self._section("Fargekoder")
+        legend.add_child(self._legend_row("warning", "Gul boks = forslag"))
+        legend.add_child(self._legend_row("new_bin", "Grønn boks = godkjent"))
+        legend.add_child(self._legend_row("path", "Blå boks = valgt"))
+        legend.add_child(self._legend_row("entrance", "Rosa kule = inngang (dør)"))
+        cyan = self._text("Cyan = tegnes nå")
+        cyan.text_color = gui.Color(*PREVIEW_COLOR)
+        legend.add_child(cyan)
+        legend.add_child(self._legend_row("dimension", "Gult håndtak = størrelse"))
+        self.panel.add_child(legend)
+
+        # -- help: collapsed by default so it can never push the buttons off screen ----------
+        help_section = self._section("Hjelp og hurtigtaster", expanded=False)
+        for heading, lines in [
+            ("Mus", ["Venstre-dra: orbit · Høyre-dra: pan",
+                     "Klikk på boks: velg den",
+                     "Ctrl+klikk: flytt valgt boks hit",
+                     "ESC: avbryt / opphev valg"]),
+            ("Tegn boks (T)", ["Starter i topdown.",
+                               "Klikk A, klikk B, trykk + dra opp, slipp."]),
+            ("Plasser boks (P)", ["Klikk på gulvet — ferdig størrelse.",
+                                  "Hold R + flytt musa for å rotere.",
+                                  "P eller ESC avslutter."]),
+            ("Håndtak på valgt boks", ["Gult = størrelse, blått = høyde,",
+                                       "rosa = roter. Dra i boksen = flytt."]),
+            ("Tastatur (valgt boks)", ["Del = slett · G = godkjenn",
+                                       "Piltaster = flytt · Q/E = roter",
+                                       "PgUp/PgDn = høyde · 1-4 = type",
+                                       "Ctrl+C / Ctrl+V = kopier / lim inn",
+                                       "Ctrl+Z = angre · Ctrl+S = lagre"]),
+            ("Visning", ["B = Polycam-sky eller egen bakgrunn"]),
+        ]:
+            help_section.add_child(self._text(heading, "text"))
+            for line in lines:
+                help_section.add_child(self._text(line, "text_muted"))
+        self.panel.add_child(help_section)
+
+        self._refresh_mode_banner()
+
     # ---------- layout ----------
 
+    def _panel_width(self, available_width: int) -> int:
+        """Panel width in em, clamped against the window: never wider than 45 % of a narrow window
+        (so the 3D view keeps a usable area) and never narrower than 12 em (so nothing clips)."""
+        ideal = T.em(self.window, 21)   # wide enough for a full list row at the default font size
+        lower = T.em(self.window, 12)
+        return max(lower, min(ideal, max(lower, int(available_width * 0.45))))
+
+    def _layout_frames(self, rect) -> tuple[gui.Rect, gui.Rect]:
+        """Scene + panel rects for a content rect. Pure, so it can be checked with synthetic
+        window sizes without clicking anything."""
+        width = max(int(rect.width), 0)
+        panel_width = min(self._panel_width(width), width)
+        scene_width = max(width - panel_width, 0)
+        scene = gui.Rect(rect.x, rect.y, scene_width, rect.height)
+        panel = gui.Rect(rect.x + scene_width, rect.y, panel_width, rect.height)
+        return scene, panel
+
     def _on_layout(self, ctx) -> None:
-        rect = self.window.content_rect
-        panel_width = 18 * self.window.theme.font_size
-        self.scene.frame = gui.Rect(rect.x, rect.y, rect.width - panel_width, rect.height)
-        self.panel.frame = gui.Rect(rect.get_right() - panel_width, rect.y, panel_width, rect.height)
+        scene_rect, panel_rect = self._layout_frames(self.window.content_rect)
+        self.scene.frame = scene_rect
+        self.panel.frame = panel_rect
+
+    # ---------- panel state ----------
+
+    def _refresh_mode_banner(self) -> None:
+        """Mirror self.mode into the coloured mode line. Called from every place that changes the
+        mode, so the panel can never claim a mode the app is not in."""
+        name, role = MODE_STYLE.get(self.mode, MODE_STYLE[MODE_NORMAL])
+        self._mode_name.text = f"MODUS: {name.upper()}"
+        self._mode_name.text_color = T.gui_color(role)
+
+    def _status(self, text: str, role: str = "text_muted") -> None:
+        self.status_label.text = text
+        self.status_label.text_color = T.gui_color(role)
 
     # ---------- scan loading ----------
 
@@ -347,10 +495,11 @@ class AnnotationApp:
         self.pan = None
         self.orbit = None
         zip_path = self._current_zip()
-        self.scan_label.text = f"Skann {self.scan_index + 1}/{len(self.scans)}:\n{zip_path.stem}"
+        self._scan_counter.text = f"SKANN {self.scan_index + 1} AV {len(self.scans)}"
+        self.scan_label.text = zip_path.stem
 
         if not is_prepared(zip_path):
-            self.status_label.text = "Forbereder i bakgrunnen ...\n(lastes automatisk når klar)"
+            self._status("Forbereder i bakgrunnen ...\n(lastes automatisk når klar)", "warning")
             return
 
         mesh = o3d.io.read_triangle_mesh(str(self._cache_dir() / "mesh_poisson.ply"))
@@ -391,7 +540,7 @@ class AnnotationApp:
                 self.floor_height = estimated
                 self.dirty = True   # so the corrected height is saved with the annotations
         self.entrances = load_entrances(self._current_zip().stem)
-        self.status_label.text = f"{len(self.boxes)} bokser ({source})"
+        self._status(f"{len(self.boxes)} bokser ({source})")
 
         # Polycam's export as the backdrop, but only when the gate passes. gravity_rotation is left
         # at None on purpose: this tool draws mesh_poisson.ply unrotated and stores boxes and
@@ -692,7 +841,10 @@ class AnnotationApp:
         if self.selected is not None and self.selected < len(items):
             self.box_list.selected_index = self.selected
         approved = sum(1 for b in self.boxes if b.status == STATUS_APPROVED)
-        self.status_label.text = f"{len(self.boxes)} bokser, {approved} godkjent"
+        # green only when there is nothing left to approve — the count is the progress indicator
+        done = bool(self.boxes) and approved == len(self.boxes)
+        self._status(f"{len(self.boxes)} bokser, {approved} godkjent",
+                     "success" if done else "text_muted")
 
     def _draw_point_markers(self) -> None:
         for index, point in enumerate([self.draw_a, self.draw_b]):
@@ -758,7 +910,7 @@ class AnnotationApp:
 
     def _undo(self) -> None:
         if not self.undo_stack:
-            self.status_label.text = "Ingenting å angre"
+            self._status("Ingenting å angre", "warning")
             return
         self.boxes, self.selected = self.undo_stack.pop()
         if self.selected is not None and self.selected >= len(self.boxes):
@@ -923,11 +1075,11 @@ class AnnotationApp:
     def _copy_selected(self) -> None:
         if self.selected is not None and self.selected < len(self.boxes):
             self.clipboard = copy.deepcopy(self.boxes[self.selected])
-            self.status_label.text = f"Kopiert: {self.clipboard.bin_type} (Ctrl+V for å lime inn)"
+            self._status(f"Kopiert: {self.clipboard.bin_type} (Ctrl+V for å lime inn)", "text")
 
     def _paste(self) -> None:
         if self.clipboard is None:
-            self.status_label.text = "Utklippstavlen er tom (Ctrl+C for å kopiere valgt boks)"
+            self._status("Utklippstavlen er tom (Ctrl+C for å kopiere valgt boks)", "warning")
             return
         self._push_undo()
         box = copy.deepcopy(self.clipboard)
@@ -977,7 +1129,8 @@ class AnnotationApp:
         self.draw_b = None
         self.draw_box = None
         self._top_down_view()
-        self.mode_label.text = "Tegner: klikk hjørne A på gulvet"
+        self.mode_label.text = "Klikk hjørne A på gulvet"
+        self._refresh_mode_banner()
 
     def _cancel_draw(self) -> None:
         self.mode = MODE_NORMAL
@@ -985,7 +1138,8 @@ class AnnotationApp:
         self.draw_a = None
         self.draw_b = None
         self.draw_box = None
-        self.mode_label.text = ""
+        self.mode_label.text = "Klikk en boks for å velge den"
+        self._refresh_mode_banner()
         if self.mesh_loaded:
             self._remove_geometry("preview")
             self._remove_geometry("preview_pt_0")
@@ -1008,9 +1162,11 @@ class AnnotationApp:
         self.mode = MODE_PLACE
         # behold kameravinkelen brukeren står i — plassering skal ikke tvinge topdown
         self.mode_label.text = (
-            f"Plasser «{self.type_combo.selected_text}»: klikk på gulvet. Hold R + flytt musa "
-            "for å rotere.\nKlikk «Plasser boks av/på» igjen (eller P / ESC) for å avslutte."
+            f"«{self.type_combo.selected_text}»\n"
+            "Klikk på gulvet. Hold R + flytt musa for å rotere.\n"
+            "P eller ESC avslutter."
         )
+        self._refresh_mode_banner()
 
     def _place_preview(self, xz: tuple[float, float] | None) -> None:
         self._remove_geometry("preview")
@@ -1096,12 +1252,12 @@ class AnnotationApp:
             if self.draw_stage == 0:
                 self.draw_a = point_xz
                 self.draw_stage = 1
-                self.mode_label.text = "Tegner: klikk hjørne B (første kant)"
+                self.mode_label.text = "Klikk hjørne B (første kant)"
             elif self.draw_stage == 1:
                 if np.linalg.norm(point_xz - self.draw_a) >= 0.05:
                     self.draw_b = point_xz
                     self.draw_stage = 2
-                    self.mode_label.text = "Tegner: trykk for dybde, dra opp, slipp"
+                    self.mode_label.text = "Trykk for dybde, dra opp, slipp"
             elif self.draw_stage == 2:
                 rect = self._rect_from_points(point_xz)
                 if rect is not None:
@@ -1116,7 +1272,7 @@ class AnnotationApp:
                         source="manuell",
                     )
                     self.draw_stage = 3
-                    self.mode_label.text = "Tegner: dra opp for høyde, slipp for å fullføre"
+                    self.mode_label.text = "Dra opp for høyde, slipp for å fullføre"
                     self._draw_preview(None, height=1.0)
             return gui.Widget.EventCallbackResult.CONSUMED
 
@@ -1320,11 +1476,12 @@ class AnnotationApp:
     def _toggle_entrance_mode(self) -> None:
         if self.mode == MODE_ENTRANCE:
             self.mode = MODE_NORMAL
-            self.mode_label.text = ""
+            self.mode_label.text = "Klikk en boks for å velge den"
         else:
             self._cancel_draw()
             self.mode = MODE_ENTRANCE
-            self.mode_label.text = "Inngang-modus: klikk = ny dør, Ctrl+klikk = slett nærmeste"
+            self.mode_label.text = "Klikk = ny dør\nCtrl+klikk = slett nærmeste"
+        self._refresh_mode_banner()
 
     def _clear_entrances(self) -> None:
         self.entrances = []
@@ -1338,7 +1495,7 @@ class AnnotationApp:
         for i, (x, z) in enumerate(self.entrances):
             sphere = o3d.geometry.TriangleMesh.create_sphere(0.13, resolution=12)
             sphere.translate([x, self._floor_y() + 0.13, z])
-            sphere.paint_uniform_color([1.0, 0.1, 1.0])
+            sphere.paint_uniform_color(list(T.rgb_of("entrance")))   # magenta = inngang, as in the previews
             material = rendering.MaterialRecord()
             material.shader = "defaultUnlit"
             self.scene.scene.add_geometry(f"entrance_{i}", sphere, material)
@@ -1380,8 +1537,9 @@ class AnnotationApp:
         )
         self.dirty = False
         approved = sum(1 for b in self.boxes if b.status == STATUS_APPROVED)
-        self.status_label.text = (
-            f"Lagret: {len(self.boxes)} bokser, {approved} godkjent, {len(self.entrances)} inngang"
+        self._status(
+            f"Lagret: {len(self.boxes)} bokser, {approved} godkjent, {len(self.entrances)} inngang",
+            "success",
         )
 
     def _on_close(self) -> bool:
