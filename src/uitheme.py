@@ -112,12 +112,16 @@ ROLES: dict[str, RGB255] = {
     "ink":            _from_style(style.INK),            # text ON "paper"
 
     # -- interaction ----------------------------------------------------------
-    # one restrained accent, kept clearly darker/duller than the push-path blue it derives from
-    "accent":         _mix(_PATH, _PANEL, 0.22),
-    "accent_hover":   _mix(_mix(_PATH, _PANEL, 0.22), _WHITE, 0.14),
-    "accent_muted":   _mix(_mix(_PATH, _PANEL, 0.22), _PANEL, 0.55),   # disabled primary button
-    "focus_ring":     _mix(_PATH, _WHITE, 0.22),
-    "selection_bg":   _mix(_PATH, _PANEL, 0.22),
+    # INDIGO, deliberately NOT derived from a scene colour. The accent used to be a duller push-path
+    # blue, which made one colour mean two things: "the route a bin is wheeled along" in the images and
+    # "the control you should press" in the UI. Indigo sits clear of all four semantic colours (green
+    # new bin, red existing bin, blue path, magenta entrance) and of the amber clutter/dimension tone,
+    # so it can never be read as scene meaning.
+    "accent":         (0x5F, 0x57, 0xD8),
+    "accent_hover":   _mix((0x5F, 0x57, 0xD8), _WHITE, 0.16),
+    "accent_muted":   _mix((0x5F, 0x57, 0xD8), _PANEL, 0.55),          # disabled primary button
+    "focus_ring":     _mix((0x5F, 0x57, 0xD8), _WHITE, 0.34),
+    "selection_bg":   _mix((0x5F, 0x57, 0xD8), _PANEL, 0.18),
     "selection_fg":   _WHITE,
 
     # -- status ---------------------------------------------------------------

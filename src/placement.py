@@ -313,6 +313,7 @@ def pack_placements(
     wall_weight: float = 3.0,
     near_weight: float = 1.6,
     size_weight: float = 0.9,
+    group_radius: float = 5.0,
 ) -> tuple[list[Candidate], np.ndarray, np.ndarray]:
     """Fill free floor with a MIX of bin types (bin_specs = (name, length, width), largest first).
 
@@ -389,7 +390,24 @@ def pack_placements(
         score = base + wall_weight * wall_bonus + near_weight * near_bonus + size_bonus
         return [s for _, s in sorted(zip(score, spots), key=lambda pair: -float(pair[0]))]
 
+    # HARD limit on how far a new bin may sit from the bins already in the room. "Near the existing
+    # bins" used to be only a ranking bonus, so once the good nearby spots were taken the packer
+    # cheerfully filled the far end of a large yard: measured over 7 rooms, 51% of proposals sat more
+    # than 4 m from the nearest existing bin and 38% more than 8 m, the worst 18.9 m away in a
+    # 21x11 m yard. A bin that far off is not a bin in this waste room; it is a bin somewhere else.
+    # Anchors are the EXISTING bins (not the ones we just placed) so a chain of 4 m hops cannot creep
+    # across the yard; with no existing bins the entrance is the anchor, since that is where a new
+    # collection point belongs.
+    anchors = existing_centers or list(entrances)
+
+    def _near_group(xz: tuple[float, float]) -> bool:
+        if not anchors:
+            return True    # nothing to anchor to (no bins, no door) — fall back to the old behaviour
+        return any(np.hypot(xz[0] - ax, xz[1] - az) <= group_radius for ax, az in anchors)
+
     def _fits(spot: Candidate) -> bool:
+        if not _near_group(spot.center_xz):
+            return False   # too far from the room's bin group / entrance
         cand_mask = _box_mask(spot.rect, origin, cell, shape, grow=spacing)
         if (cand_mask & occ).any():
             return False   # overlaps an existing/placed bin
