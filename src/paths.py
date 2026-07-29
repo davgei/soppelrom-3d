@@ -35,6 +35,13 @@ DATASET_DIR = DATA_HOME / "yolo_dataset"
 # are also ~3x sparser than our own TSDF reconstruction, so they are an alternative, not an upgrade.
 PLY_DIR = DATA_HOME / "ply"
 
+# Polycam's MESH exports (GLTF/OBJ/...). Deliberately NOT in raw/: they arrive as .zip and
+# pipeline.list_scans() globs raw/*.zip, so a mesh export dropped there would appear as a phantom
+# scan. A mesh is what Polycam actually shows in its own app, and unlike the .ply point export it
+# stays sharp when you zoom in — a point cloud renders at a fixed pixel size, so zooming only spreads
+# the dots apart.
+MESH_DIR = DATA_HOME / "polycam_mesh"
+
 # human work — travels with the repo (git-tracked, tiny)
 ANNOTATION_DIR = PROJECT_ROOT / "outputs" / "annotations"
 ENTRANCE_DIR = PROJECT_ROOT / "outputs" / "entrances"

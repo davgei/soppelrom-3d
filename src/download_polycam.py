@@ -26,6 +26,7 @@ from pathlib import Path
 
 from playwright.sync_api import BrowserContext, Download, Page, TimeoutError, sync_playwright
 
+from .paths import MESH_DIR, PLY_DIR
 from .prepare_scan import PROJECT_ROOT, RAW_DIR
 
 PROFILE_DIR = PROJECT_ROOT / "outputs" / "browser_profile"
@@ -58,6 +59,20 @@ def _load_ledger() -> set[str]:
     if LEDGER.exists():
         return {line.strip() for line in LEDGER.read_text(encoding="utf-8").splitlines() if line.strip()}
     return set()
+
+
+def _dest_dir(fmt: str) -> Path:
+    """Where a download lands, by format.
+
+    Only the raw keyframe archive ("Images") belongs in raw/: pipeline.list_scans() globs raw/*.zip,
+    and a mesh export (which also arrives as a .zip) dropped there would show up as a phantom scan.
+    Point exports go to PLY_DIR, mesh exports to MESH_DIR."""
+    low = fmt.lower()
+    if low == "images":
+        return RAW_DIR
+    if low == "ply":
+        return PLY_DIR
+    return MESH_DIR
 
 
 def _ledger_key(capture_id: str, fmt: str) -> str:
@@ -409,7 +424,8 @@ def export_capture(page: Page, context: BrowserContext, url: str, fmt: str) -> b
     name = download.suggested_filename or f"{url.rstrip('/').split('/')[-1]}.zip"
     if not Path(name).suffix:
         name = f"{name}.zip"
-    target = RAW_DIR / name
+    target = _dest_dir(fmt) / name
+    target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
         print(f"  hopper over (finnes): {name}", flush=True)
         return True
