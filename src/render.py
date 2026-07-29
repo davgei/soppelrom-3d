@@ -278,9 +278,18 @@ def annotated_topdown(
     colors = np.asarray(aligned_pcd.colors)
     u, v, depth = points[:, 0], points[:, 2], points[:, 1]
 
-    u_min, v_min = u.min(), v.min()
-    width = max(int((u.max() - u_min) * px_per_m) + 1, 1)
-    height = max(int((v.max() - v_min) * px_per_m) + 1, 1)
+    # Size the canvas to the cloud AND the footprint rectangle. The outline is a minAreaRect of the
+    # floor, so on a rotated or ragged scan a corner can sit OUTSIDE the cloud's own extent — and then
+    # the outline, its dimension line and the value pill were drawn off-canvas and cut off. The extra
+    # 0.45 m leaves room for the arrowed line and the pill beside it.
+    corners = cv2.boxPoints(footprint.rect)
+    margin_m = 0.45
+    u_min = min(float(u.min()), float(corners[:, 0].min()) - margin_m)
+    v_min = min(float(v.min()), float(corners[:, 1].min()) - margin_m)
+    u_max = max(float(u.max()), float(corners[:, 0].max()) + margin_m)
+    v_max = max(float(v.max()), float(corners[:, 1].max()) + margin_m)
+    width = max(int((u_max - u_min) * px_per_m) + 1, 1)
+    height = max(int((v_max - v_min) * px_per_m) + 1, 1)
     px = np.clip(((u - u_min) * px_per_m).astype(int), 0, width - 1)
     py = np.clip(((v - v_min) * px_per_m).astype(int), 0, height - 1)
 

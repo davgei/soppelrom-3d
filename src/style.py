@@ -748,8 +748,18 @@ def dimension_line(
         poly = np.array([tipp, base + wing, base - wing], np.int32)
         cv2.fillPoly(image, [poly], color, cv2.LINE_AA)
     mid = (start + end) / 2 + normal * label_offset
+    # Keep the value pill fully on the canvas. The caller aims it at the room interior, but on a
+    # rotated plan whose outline reaches the edge of the raster the pill still lands half outside and
+    # the number is cut off. Clamping the centre is the last line of defence and is a no-op when the
+    # pill already fits.
+    pad_x, pad_y = 12, 6
+    text_w, text_h = text_size(label, size, "semibold")
+    half_w, half_h = text_w / 2 + pad_x + 2, text_h / 2 + pad_y + 2
+    height, width = image.shape[:2]
+    mid[0] = float(np.clip(mid[0], half_w, max(half_w, width - half_w)))
+    mid[1] = float(np.clip(mid[1], half_h, max(half_h, height - half_h)))
     draw_text(image, label, tuple(mid.astype(int)), size=size, weight="semibold", color=color,
-              anchor="cc", halo=0, box=True, box_color=PANEL, box_alpha=0.8, box_pad=(12, 6),
+              anchor="cc", halo=0, box=True, box_color=PANEL, box_alpha=0.8, box_pad=(pad_x, pad_y),
               box_radius=10, box_edge=color, box_edge_alpha=0.5)
 
 

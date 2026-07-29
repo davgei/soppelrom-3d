@@ -368,6 +368,52 @@ def _unit2(direction: np.ndarray) -> np.ndarray:
     return d / norm if norm > 1e-6 else np.array([1.0, 0.0])
 
 
+TRUCK_CLEARANCE_M = 1.2   # how far past the room boundary the rear hopper should sit
+
+
+def _truck_anchor(scene, dump_pos, arrive_dir) -> tuple[np.ndarray, np.ndarray]:
+    """Where to park the truck: OUTSIDE the scanned room, hopper facing back toward the dump spot.
+
+    The dump spot is the entrance, which sits ON the scanned floor, so parking the truck there put a
+    5.5 m lorry inside the point cloud, straddling the bins. A real truck stands out on the street, so
+    march outwards from the entrance until clear of the room footprint, then add a little more.
+    Direction: the walker's arrival heading when that already points out of the room, otherwise
+    straight out from the room centre (the door model is not reliable enough to trust blindly)."""
+    footprint = scene.footprint
+    mask = np.asarray(footprint.mask, dtype=bool)
+    origin, cell = footprint.origin, footprint.cell
+    rows, cols = mask.shape
+    centre = np.array(footprint.center_xz, dtype=float)
+    start = np.array([float(dump_pos[0]), float(dump_pos[1])])
+
+    outward = start - centre
+    norm = float(np.hypot(*outward))
+    outward = outward / norm if norm > 1e-6 else np.array([1.0, 0.0])
+    arrive = np.asarray(arrive_dir, dtype=float).ravel()[:2]
+    if float(np.hypot(*arrive)) > 1e-6:
+        arrive = arrive / float(np.hypot(*arrive))
+        if float(arrive @ outward) > 0.2:     # the walk already leaves the room — keep that heading
+            outward = arrive
+
+    def inside(point) -> bool:
+        c = int(np.floor((point[0] - origin[0]) / cell))
+        r = int(np.floor((point[1] - origin[1]) / cell))
+        return 0 <= r < rows and 0 <= c < cols and bool(mask[r, c])
+
+    exit_at, clear = None, 0.0
+    for step in np.arange(0.0, 14.0, 0.25):   # find where we leave the room and STAY out
+        if inside(start + outward * step):
+            exit_at, clear = None, 0.0
+            continue
+        if exit_at is None:
+            exit_at = float(step)
+        clear += 0.25
+        if clear >= 1.0:                      # a full metre outside: this really is the boundary
+            break
+    distance = (exit_at if exit_at is not None else 0.0) + TRUCK_CLEARANCE_M
+    return start + outward * distance, outward
+
+
 def _truck_mesh(pos: np.ndarray, direction_out: np.ndarray, floor: float) -> o3d.geometry.TriangleMesh:
     """A simple renovation truck parked outside the entrance, rear hopper toward the dump spot:
     dark open hopper, green body, white cab, black wheels."""
@@ -863,8 +909,9 @@ class PlacementViewer:
             if pause is not None:
                 truck_mat = rendering.MaterialRecord()
                 truck_mat.shader = "defaultLit"
+                truck_pos, truck_dir = _truck_anchor(scene, pause["pos"], pause["dir"])
                 self.scene.scene.add_geometry(
-                    "sti_truck", _truck_mesh(pause["pos"], pause["dir"], self._anim["floor"]), truck_mat)
+                    "sti_truck", _truck_mesh(truck_pos, truck_dir, self._anim["floor"]), truck_mat)
 
         if scene.enclosed:
             self.stats_label.text = "⚠ INNESPERRET rom (dør lukket i scan) — hoppet over"
