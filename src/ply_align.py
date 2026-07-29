@@ -537,6 +537,33 @@ def has_polycam(stem: str) -> bool:
     return find_ply(stem) is not None
 
 
+# Backdrop availability as one short symbol per scan. Cache-only ON PURPOSE: align_transform()
+# computes the registration on a cache miss (8-45 s), which would freeze a GUI listing every scan.
+PLY_NONE = ""            # no Polycam export for this scan
+PLY_UNREGISTERED = "○"   # export exists, not registered yet
+PLY_REJECTED = "✗"       # registered, but the quality gate rejected it
+PLY_OK = "●"             # registered and trustworthy -> the 3D views will show it
+
+
+def backdrop_status(stem: str) -> tuple[str, str]:
+    """(symbol, Norwegian explanation) for whether the Polycam cloud can be shown for `stem`.
+
+    Never computes anything — reads only the cached registration, so it is safe to call for every
+    scan while populating a list."""
+    if find_ply(stem) is None:
+        return PLY_NONE, "ingen Polycam-eksport for dette skannet"
+    if not our_cloud_path(stem).exists():
+        return PLY_NONE, "Polycam-eksport finnes, men skannet er ikke forberedt"
+    cached = _read_cache(stem)
+    if cached is None:
+        return PLY_UNREGISTERED, ("Polycam-eksport finnes, men er ikke registrert ennå — kjør "
+                                  f"python -m src.ply_align --scan {stem}")
+    _, quality = cached
+    if not quality.ok:
+        return PLY_REJECTED, f"Polycam-sky avvist av kvalitetsporten: {quality.reason}"
+    return PLY_OK, f"Polycam-sky i 3D — avvik {quality.residual_median * 100:.1f} cm"
+
+
 def available_stems() -> list[str]:
     """Scans that have both a Polycam export and a reconstruction to register it against."""
     return [path.stem for path in sorted(PLY_DIR.glob("*.ply")) if our_cloud_path(path.stem).exists()]

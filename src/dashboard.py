@@ -19,7 +19,7 @@ from tkinter import ttk
 
 from PIL import Image, ImageTk
 
-from . import pipeline
+from . import pipeline, ply_align
 from .annotations import BIN_TYPES
 from .set_entrance import ENTRANCE_DIR
 
@@ -53,6 +53,7 @@ class Dashboard:
         self.status = tk.StringVar(value="Klar.")
         self.search = tk.StringVar(value="")
         self._addr_cache: dict[str, str | None] = {}
+        self._ply_reason: dict[str, str] = {}   # per scan: why the 3D column shows what it shows
         self._photo: ImageTk.PhotoImage | None = None
         self._pil: Image.Image | None = None
         self._busy = False
@@ -144,13 +145,16 @@ class Dashboard:
         search_entry = ttk.Entry(left, textvariable=self.search)
         search_entry.pack(fill="x", padx=10, pady=(0, 8))
         search_entry.bind("<KeyRelease>", lambda _e: self._populate())
-        self.tree = ttk.Treeview(left, columns=("status", "bins"), show="tree headings", height=24, selectmode="browse")
+        self.tree = ttk.Treeview(left, columns=("status", "bins", "ply"), show="tree headings",
+                                 height=24, selectmode="browse")
         self.tree.heading("#0", text="Adresse")
         self.tree.heading("status", text="Status")
         self.tree.heading("bins", text="Kasser")
+        self.tree.heading("ply", text="3D")   # ● = Polycam-sky vises i 3D, ○ = ikke registrert, ✗ = avvist
         self.tree.column("#0", width=300)
         self.tree.column("status", width=90, anchor="center")
         self.tree.column("bins", width=60, anchor="center")
+        self.tree.column("ply", width=34, anchor="center")
         self.tree.tag_configure("annotated", foreground=GOOD)
         self.tree.tag_configure("prepared", foreground=TEXT)
         self.tree.tag_configure("raw", foreground=MUTED)
@@ -239,7 +243,8 @@ class Dashboard:
             else:
                 status, tag = "rå", "raw"
             bins = pipeline.existing_bin_count(stem) if pipeline.is_prepared(stem) else ""
-            self.tree.insert("", "end", iid=stem, text=label, values=(status, bins), tags=(tag,))
+            ply, self._ply_reason[stem] = ply_align.backdrop_status(stem)
+            self.tree.insert("", "end", iid=stem, text=label, values=(status, bins, ply), tags=(tag,))
         children = self.tree.get_children()
         if children:
             self.tree.selection_set(children[0])
@@ -276,6 +281,9 @@ class Dashboard:
     def _on_select(self) -> None:
         self._load_stats()
         self._show_image()
+        stem = self._selected()   # explain the "3D" column so the symbol is not cryptic
+        if stem and stem in self._ply_reason:
+            self.status.set(self._ply_reason[stem])
 
     def _show_image(self) -> None:
         stem = self._selected()
