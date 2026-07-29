@@ -52,6 +52,11 @@ MIN_TYPE_FIT = 0.15         # must fit one generated type at least this well (lo
 # let odd/sliver boxes pass as bins. A candidate that fits neither 2- nor 4-wheel is rejected.
 SCORE_TYPES = ["2-hjuls dunk", "4-hjuls container"]
 
+# Which 2D class labels are allowed to override the measured size. Only this one: see the measurement
+# in score_candidate's docstring -- "4-hjuls container" is 94% precise on unseen scans, "2-hjuls dunk"
+# is 47%, and a coin toss must not be allowed to shrink a container.
+TRUSTED_LABELS = frozenset({"4-hjuls container"})
+
 
 @dataclass
 class BinVerdict:
@@ -113,11 +118,35 @@ def score_candidate(
     mean_confidence: float,
     n_views: int,
     color_term: float | None = None,
+    label_hint: str | None = None,
 ) -> BinVerdict:
+    """label_hint: the majority 2D class YOLO gave this cluster, when there is one.
+
+    It overrides the measured size for ONE class, and the asymmetry is measured, not assumed. On 13
+    scans annotated after the current weights were trained (so the model had never seen them), per
+    real bin, of the 31 bins detected at all:
+
+        size fit alone (the old rule)          18/31   58%
+        4-hjuls label overrides size           26/31   84%
+        label decides always                   26/31   84%
+        always guess 4-hjuls (baseline)        22/31   71%
+
+    The label is real information, not just the majority class -- it beats that baseline. But only in
+    one direction: the "4-hjuls container" label had 94% precision (32 of 34), while "2-hjuls dunk"
+    had 47%, barely a coin toss. So a 4-wheel label is trusted and a 2-wheel label is ignored; letting
+    the label decide always scored the same overall but got there by overruling size on boxes measured
+    at 1.37 and 1.54 m, where the size was plainly right.
+
+    Why the size fit fails so often: the back-projected footprint of a 4-wheel container is routinely
+    0.7-1.0 m because a scan never captures the whole of it, and that is a perfect 2-hjuls dunk. The
+    box is then snapped to the wrong type's exact dimensions, so a measurement error becomes a
+    confident wrong answer. 31 bins is a small sample; the 26-point gap over today's rule is not.
+    """
     fits = _type_fits(size_lhw)
     ordered = sorted(fits.items(), key=lambda kv: kv[1], reverse=True)
     best_type, best_fit = ordered[0]
     second_fit = ordered[1][1] if len(ordered) > 1 else 0.0
+    hinted = label_hint in TRUSTED_LABELS and label_hint in SCORE_TYPES
 
     size_term = best_fit
     conf_term = float(np.clip(mean_confidence / 0.5, 0.0, 1.0))
@@ -136,6 +165,10 @@ def score_candidate(
 
     type_confident = (best_fit - second_fit) >= TYPE_MARGIN and best_fit >= MIN_TYPE_FIT
     bin_type = best_type  # only 2-/4-wheel are generated; poor fits are rejected below
+    if hinted and bin_type != label_hint:
+        # The detector recognised the object; the size only measured what the scanner happened to see.
+        bin_type = label_hint
+        type_confident = True
 
     long_side, short_side, height = _footprint_and_height(size_lhw)
     aspect = long_side / max(short_side, 1e-6)

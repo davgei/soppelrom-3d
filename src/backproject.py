@@ -42,6 +42,20 @@ class BinInstance:
     labels: dict[str, int] = field(default_factory=dict)
     points: np.ndarray | None = None
 
+    def majority_label(self) -> str | None:
+        """The 2D class most of this cluster's detections agreed on, or None if they were tied.
+
+        A tie is reported as None rather than picked arbitrarily: binfit lets one specific label
+        override the measured size, so "the views disagreed" must not become "the views said 4-hjuls"
+        because that key happened to sort first.
+        """
+        if not self.labels:
+            return None
+        ranked = sorted(self.labels.items(), key=lambda kv: -kv[1])
+        if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+            return None
+        return ranked[0][0]
+
 
 def _box_points_world(
     archive: ScanArchive,
@@ -131,7 +145,16 @@ def _cluster_centroids(centroids: np.ndarray, eps: float, min_samples: int) -> n
 def _split_masks(points_xz: np.ndarray, bin_width: float = 0.05) -> list[np.ndarray] | None:
     """Split a merged cluster of adjacent bins by finding density valleys (the gaps between
     bins) along the cluster's long axis. Returns per-segment boolean masks, or None if the
-    cluster is single-bin sized or shows no clear multi-bin structure."""
+    cluster is single-bin sized or shows no clear multi-bin structure.
+
+    TRIED AND REVERTED (measured inert): raising the split limit for clusters the detector labelled
+    "4-hjuls container" to 1.3x that type's length (0.95 -> 1.78 m), so a single container could not be
+    cut in two, optionally requiring a deep valley in the ambiguous band. On 13 holdout scans it gave
+    byte-identical results to leaving the threshold alone -- 25 bins found, 23 typed right, 0
+    shattered -- because binfit's label override already fixes the split: both halves become 4-hjuls,
+    snap_box_to_type grows both to 1.37 m, they then overlap, and remove_overlapping_boxes drops one.
+    The cut still happens; it just no longer survives. Kept simple rather than carrying a knob that
+    changes nothing."""
     rect = cv2.minAreaRect(points_xz.astype(np.float32))
     box = cv2.boxPoints(rect)
     edge_a, edge_b = box[1] - box[0], box[2] - box[1]

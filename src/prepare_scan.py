@@ -150,7 +150,11 @@ def prepare(
 
     boxes: list[annotations.BinBox] = []
     for inst in instances:
-        verdict = binfit.score_candidate(inst.size, inst.mean_confidence, inst.n_views)
+        # The 2D class comes along now: a 4-wheel container's back-projected footprint is routinely
+        # 0.7-1.0 m (a scan rarely sees all of it), which is exactly 2-hjuls sized, so the measurement
+        # alone typed 42% of them wrong. See binfit.score_candidate for the holdout numbers.
+        verdict = binfit.score_candidate(inst.size, inst.mean_confidence, inst.n_views,
+                                         label_hint=inst.majority_label())
         if not verdict.keep:  # size+appearance fusion rejects noise (slivers, blobs, structure)
             continue
         y_min = float(inst.center[1] - inst.size[1] / 2)
