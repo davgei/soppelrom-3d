@@ -45,10 +45,18 @@ from .annotations import BIN_TYPES
 
 PLAN_NAME = "plan.json"
 MASKS_NAME = "masks.png"
+MESH_NAME = "room.glb"
 
 # plan.json format version. The browser refuses a plan it does not understand rather than drawing a
 # room with, say, the length and width silently swapped.
-PLAN_VERSION = 1
+# 2: added "mesh" (the .glb for the 3D view) and "floor_y".
+PLAN_VERSION = 2
+
+# Triangles to keep in room.glb. The cache meshes are far heavier than a browser needs -- median 487k
+# triangles across the 322 scans, up to 936k, which is ~12 MB of raw buffers for a 9 x 10 m room.
+# 120k measures 2.25 MB and, just as usefully, lands under 65 536 vertices for every scan sampled, so
+# the index buffer is 16-bit and is halved. Decimation is the slow part of the export at 1.3-4.1 s.
+MESH_TARGET_TRIANGLES = 120_000
 
 # Bit per grid in masks.png. Shipped in plan.json too, so the browser reads the bit positions from
 # the data instead of hard-coding numbers that could drift from this table.
@@ -228,6 +236,10 @@ def build_plan(scene) -> dict:
         "entrances": entrances,
         "entrance_source": "innesperret" if scene.enclosed else ("klikket" if scene.clicked else "auto"),
         "path": _path_polyline(result),
+        # Height of the floor plane in the SAME frame as room.glb, so the 3D view can lay the floor
+        # overlay and stand the bins on it. Kept at the top level next to the geometry it applies to,
+        # not only inside "room", because every 3D drawing call needs it.
+        "floor_y": round(float(scene.floor_height), 4),
     }
 
 
@@ -250,11 +262,112 @@ def build_masks(scene) -> Image.Image:
     return Image.fromarray(packed, mode="L")
 
 
+def write_mesh(scene, out_dir: Path) -> dict | None:
+    """Write room.glb -- the scan mesh the 3D view draws. None when the scan has no usable mesh.
+
+    scene.mesh is already rotated into the gravity-aligned frame by compute_scene, which is the frame
+    plan.json's metres are in, so the .glb needs no transform of its own and a bin at (x, z) in the
+    plan stands at (x, z) in the 3D view.
+    """
+    if getattr(scene, "mesh", None) is None or not scene.mesh.has_triangles():
+        return None
+    from . import glb
+    return glb.write_open3d_mesh(out_dir / MESH_NAME, scene.mesh, MESH_TARGET_TRIANGLES)
+
+
 def write(scene, out_dir: Path) -> dict:
-    """Write plan.json + masks.png for one computed scene. Returns the plan dict."""
+    """Write plan.json + masks.png + room.glb for one computed scene. Returns the plan dict."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    # The mesh is written BEFORE plan.json so the plan can record what actually landed on disk -- if
+    # the export failed, the plan says mesh: null and the browser opens the 2D plan instead of asking
+    # for a .glb that is not there.
     plan = build_plan(scene)
+    plan["mesh"] = write_mesh(scene, out_dir)
     (out_dir / PLAN_NAME).write_text(json.dumps(plan, indent=1), encoding="utf-8")
     # optimize=True on a 3-colour image is nearly free and roughly halves it
     build_masks(scene).save(out_dir / MASKS_NAME, optimize=True)
     return plan
+
+
+def main() -> None:
+    """Write the browser's data for scans that do not have it yet.
+
+    analyze_and_render produces it as a side effect of "Generer bilder", but only for scans generated
+    since this export existed -- 136 of the 141 rendered scans had none, and the browser listed them as
+    unopenable while the desktop app showed them fine. Re-running "Generer bilder" would redo the four
+    offscreen renders too, and those are the expensive part: the analysis is 1.4 s per scan and the mesh
+    another 1.3-4.1 s, so the whole set of 322 is about half an hour rather than a day.
+
+    Writes ONLY plan.json, masks.png and room.glb. Existing PNGs and stats.json are left exactly as they
+    are, so running this can never lose a rendered sheet.
+    """
+    import argparse
+    import time
+
+    from . import pipeline
+
+    parser = argparse.ArgumentParser(
+        description="Skriv plandata (plan.json + masks.png) slik at rommet kan åpnes i nettleseren")
+    parser.add_argument("stems", nargs="*",
+                        help="skann-ID-er; tomt = alle forberedte skann som mangler plandata")
+    parser.add_argument("--force", action="store_true",
+                        help="skriv på nytt selv om plandataene finnes")
+    parser.add_argument("--previewed-only", action="store_true",
+                        help="bare skann som alt har bilder (stats.json)")
+    parser.add_argument("--bin-type", default="4-hjuls container",
+                        help="kassetypen forslagene dimensjoneres etter")
+    parser.add_argument("--limit", type=int, help="stopp etter N skann")
+    args = parser.parse_args()
+
+    stems = args.stems or pipeline.list_scans()
+    todo = []
+    for stem in stems:
+        if not pipeline.is_prepared(stem):
+            continue          # no point cloud yet: prepare_scan has to run first
+        out = pipeline.preview_dir(stem)
+        if args.previewed_only and not (out / "stats.json").exists():
+            continue
+        if (out / PLAN_NAME).exists() and not args.force:
+            continue
+        todo.append(stem)
+    if args.limit:
+        todo = todo[:args.limit]
+
+    if not todo:
+        print("[plandata] ingenting å gjøre — alle valgte skann har plandata "
+              "(bruk --force for å skrive dem på nytt)")
+        return
+
+    # ~1.4 s for the analysis plus 1.3-4.1 s to decimate and write the mesh; 5 s per scan is the
+    # measured middle. Printed up front because the whole set is half an hour and that should not be
+    # a surprise halfway through.
+    print(f"[plandata] {len(todo)} skann, ca. {len(todo) * 5 / 60:.0f} min")
+    failed: list[tuple[str, str]] = []
+    started = time.perf_counter()
+    for index, stem in enumerate(todo, 1):
+        try:
+            scene = pipeline.compute_scene(stem, args.bin_type)
+            plan = write(scene, pipeline.preview_dir(stem))
+        except KeyboardInterrupt:
+            # Stopping is normal for a minutes-long job: the scans already written keep their plan
+            # data, and a re-run picks up exactly where this left off (they are skipped as done).
+            print(f"\n[plandata] avbrutt etter {index - 1} av {len(todo)}")
+            break
+        except Exception as error:      # noqa: BLE001 - one bad scan must not stop the batch
+            failed.append((stem, f"{type(error).__name__}: {error}"))
+            print(f"[{index}/{len(todo)}] {stem}: FEIL — {type(error).__name__}: {error}")
+            continue
+        mesh = plan.get("mesh")
+        print(f"[{index}/{len(todo)}] {plan.get('address') or stem} — "
+              f"{len(plan['bins'])} kasser, {plan['room']['area_m2']} m², "
+              + (f"{mesh['bytes'] / 1024**2:.1f} MB 3D" if mesh else "ingen 3D-modell"))
+
+    print(f"[plandata] ferdig på {(time.perf_counter() - started) / 60:.1f} min")
+    if failed:
+        print(f"[plandata] {len(failed)} skann feilet:")
+        for stem, message in failed:
+            print(f"  {stem}: {message}")
+
+
+if __name__ == "__main__":
+    main()

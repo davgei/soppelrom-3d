@@ -321,7 +321,10 @@ def redetect(
 
             boxes: list[annotations.BinBox] = []
             for inst in instances:
-                verdict = binfit.score_candidate(inst.size, inst.mean_confidence, inst.n_views)
+                # Same label override as prepare(): without it --redetect would quietly rewrite every
+                # proposal with a size-only type and undo the fix on any scan it touched.
+                verdict = binfit.score_candidate(inst.size, inst.mean_confidence, inst.n_views,
+                                                 label_hint=inst.majority_label())
                 if not verdict.keep:
                     continue
                 y_min = float(inst.center[1] - inst.size[1] / 2)

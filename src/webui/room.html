@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="no">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Søppelrom — rom</title>
+<link rel="stylesheet" href="/static/app.css">
+<!-- Inline so the browser stops asking for /favicon.ico and getting a 404 in the server log. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231baf7a'/%3E%3Crect x='9' y='11' width='14' height='13' rx='2' fill='%23fcfcfb'/%3E%3Crect x='11' y='8' width='10' height='3' rx='1.5' fill='%23fcfcfb'/%3E%3C/svg%3E">
+
+<!-- Tells the browser what the bare name "three" means. The vendored OrbitControls and GLTFLoader are
+     three.js's own files, unmodified, and they import from 'three' -- this map is what lets them work
+     from disk with no build step and no CDN. -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "/static/vendor/three.module.min.js",
+    "three/addons/": "/static/vendor/"
+  }
+}
+</script>
+</head>
+<body>
+
+<div class="topbar">
+  <a href="/" class="home" title="Alle rom">
+    <span class="mark"></span>
+  </a>
+  <div class="home" style="flex-direction:column;align-items:flex-start;gap:0">
+    <h1 id="addr">…</h1>
+    <div class="sub mono" id="scanid"></div>
+  </div>
+  <div class="spacer"></div>
+  <div class="pills" id="tabs">
+    <button data-tab="3d" class="on">3D-rom</button>
+    <button data-tab="2d">Plan</button>
+  </div>
+  <a href="/" class="sub">← alle rom</a>
+</div>
+
+<div class="roomlayout">
+  <div class="stage">
+    <div class="stagebar">
+      <button id="add" class="primary iconbtn">+ Legg til</button>
+      <select id="bintype" title="Kassetype som legges til"></select>
+      <button id="rotate" class="iconbtn" title="Roter valgt kasse 90° (R)">Roter</button>
+      <button id="remove" class="iconbtn" title="Fjern valgt kasse (Delete)">Fjern</button>
+      <div class="spacer"></div>
+      <button id="frame" class="iconbtn" title="Ram inn rommet (F)">Ram inn</button>
+      <button id="top" class="iconbtn" title="Se rett ovenfra">Ovenfra</button>
+      <span id="only3d"><button id="togglescan" class="iconbtn on">Skjul skann</button></span>
+      <button id="togglefloor" class="iconbtn on">Skjul gulvlag</button>
+    </div>
+
+    <div class="viewpane" id="pane3d"></div>
+    <div class="viewpane" id="pane2d" hidden></div>
+
+    <div class="stagestatus" id="stagestatus" hidden></div>
+
+    <div class="stagemsg" id="stageload" hidden>
+      <strong id="stageloadlabel">laster …</strong>
+      <div class="bar"><i id="stageloadbar"></i></div>
+    </div>
+
+    <div class="stagemsg" id="stagemsg" hidden>
+      <strong id="stagemsgtitle"></strong>
+      <div class="sub" id="stagemsgbody"></div>
+      <div><a href="/">← tilbake til alle rom</a></div>
+    </div>
+  </div>
+
+  <div class="side">
+    <div class="card">
+      <h2>Rommet</h2>
+      <div class="stats">
+        <div class="stat"><div class="k">Mål</div><div class="v" id="s-size">—</div></div>
+        <div class="stat"><div class="k">Gulvareal</div><div class="v" id="s-area">—</div></div>
+        <!-- not "ledig nå": this is the free floor WITH the bins currently in the layout, and it moves
+             as you drag, so calling it "now" would be wrong the moment you touch something -->
+        <div class="stat"><div class="k">Ledig m/ kassene</div><div class="v" id="s-free">—</div></div>
+        <div class="stat"><div class="k">Type rom</div><div class="v" id="s-kind">—</div></div>
+        <div class="stat"><div class="k">Kasser i planen</div><div class="v" id="s-bins">—</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Sjekk</h2>
+      <div class="verdict" id="verdict">
+        <span class="light"></span>
+        <span id="verdicttext">Flytt noe, eller trykk «Sjekk plasseringen».</span>
+      </div>
+      <ul class="problems" id="problems"></ul>
+      <div style="margin-top:11px">
+        <button id="check">Sjekk plasseringen</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Kasser</h2>
+      <div class="binlist" id="bins"></div>
+      <div style="margin-top:10px">
+        <button id="reset" class="quiet iconbtn">Tilbake til våre forslag</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Send inn forslag</h2>
+      <input type="text" id="by" placeholder="Ditt navn" style="width:100%; margin-bottom:8px">
+      <textarea id="note" placeholder="Hvorfor denne plasseringen? (valgfritt)"></textarea>
+      <div style="margin-top:11px; display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+        <button id="save" class="primary">Lagre forslag</button>
+        <span id="savemsg" class="sub"></span>
+      </div>
+      <p class="hint" style="margin:9px 0 0">
+        Lagres som et forslag. Det endrer ingenting i analysen før noen godkjenner det i appen.
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>Tegnforklaring</h2>
+      <div class="legend" id="legend"></div>
+    </div>
+
+    <div class="card">
+      <h2>Slik styrer du</h2>
+      <div class="keys">
+        <div><kbd>dra</kbd> <span>roter rommet · <kbd>dra kasse</kbd> flytt den</span></div>
+        <div><kbd>hjul</kbd> <span>zoom · <kbd>høyre/midt-dra</kbd> flytt blikket</span></div>
+        <div><kbd>R</kbd> <span>roter valgt kasse 90°</span></div>
+        <div><kbd>Delete</kbd> <span>fjern valgt kasse</span></div>
+        <div><kbd>F</kbd> <span>ram inn rommet</span></div>
+        <div><kbd>3</kbd> <kbd>2</kbd> <span>bytt mellom 3D og plan</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="/static/room.js"></script>
+</body>
+</html>

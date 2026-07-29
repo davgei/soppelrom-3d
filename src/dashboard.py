@@ -32,6 +32,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import tkinter as tk
@@ -46,12 +47,19 @@ from .annotations import BIN_TYPES
 from .set_entrance import ENTRANCE_DIR
 from .tkround import RoundedStyles, Tier
 
+# The last two are the pages of the sheet that goes to the housing cooperative. They are PNG renders
+# of the PDF's pages, because a tkinter Label cannot display a PDF -- the real PDF (searchable text,
+# print-ready) is one button away and REPORT_PDF is what that button opens.
 VIEWS = [
     ("Rom + mål", "room_topdown.png"),
     ("Ledig gulv", "freespace_over_scene.png"),
     ("Plassering (ny kasse)", "placements.png"),
     ("I dag / forslag", "before_after.png"),
+    ("Forslagsark", "rapport.png"),
+    ("Forslagsark s. 2", "rapport_side2.png"),
 ]
+
+REPORT_PDF = "rapport.pdf"
 
 # The status column used to spell out "✓ annotert" / "klar" / "rå" on every row, which over 322 scans
 # is 322 repetitions of three words competing with the addresses for attention. A dot in the row's own
@@ -262,6 +270,8 @@ class Dashboard:
         self.root.bind("<f>", self._hotkey(self._prepare))
         self.root.bind("<r>", self._hotkey(self._open_reconstruction))
         self.root.bind("<s>", self._hotkey(self._open_stats))
+        self.root.bind("<n>", self._hotkey(self._open_web))
+        self.root.bind("<p>", self._hotkey(self._open_report))
         self.root.bind("<Control-f>", self._focus_search)
         self.root.bind("<Escape>", self._clear_search)
         # refresh scan statuses the moment the dashboard regains focus (e.g. back from annotating)
@@ -840,6 +850,10 @@ class Dashboard:
                hint="Se den rå 3D-rekonstruksjonen uten forslag")
         button("Statistikk (S)", self._open_stats, "Quiet.TButton",
                hint="Samlerapport over alle skann i nettleseren")
+        button("Nettleser (N)", self._open_web, "Quiet.TButton",
+               hint="Start nettleserversjonen: se rommet i 3D og foreslå plassering uten å installere noe")
+        button("Åpne forslagsark (P)", self._open_report, "Quiet.TButton",
+               hint="Åpne PDF-arket for utsending til borettslaget — samme to sider som visningene")
 
         # ---------------- status bar
         bar_shell = tk.Frame(root, bg=T.DIVIDER, bd=0, highlightthickness=0)
@@ -1189,6 +1203,35 @@ class Dashboard:
             self._launch("src.reconstruct3d", "--scan", stem, "--bin-type", self.bin_type.get())
             self._set_status("Åpner 3D-rekonstruksjon (dukkehus) — gulv, vegger, tak, dører/vinduer, kasser …")
 
+    def _open_web(self) -> None:
+        """Start the local web server and open the selected room in it.
+
+        Left running after the dashboard closes on purpose: it is a server, and the point of it is that
+        somebody else on the machine (or on the network, with --host) can keep looking at rooms. Opening
+        it twice is harmless -- the second process fails to bind the port and exits, and the browser
+        lands on the one already serving.
+        """
+        stem = self._selected()
+        args = ["--no-browser"] if stem else []
+        self._launch("src.web", *args)
+        if stem:
+            import webbrowser
+            # The server needs a moment to bind before the first request; the browser retries a refused
+            # connection far less gracefully than a short wait avoids it.
+            def open_when_up() -> None:
+                import urllib.error
+                import urllib.request
+                for _ in range(40):
+                    try:
+                        urllib.request.urlopen("http://127.0.0.1:5000/", timeout=0.5)
+                        break
+                    except (urllib.error.URLError, OSError):
+                        time.sleep(0.25)
+                webbrowser.open(f"http://127.0.0.1:5000/rom/{stem}")
+
+            threading.Thread(target=open_when_up, daemon=True).start()
+        self._set_status("Starter nettleserversjonen på http://127.0.0.1:5000/ …")
+
     def _open_stats(self) -> None:
         self._set_status("Genererer statistikk …")
 
@@ -1203,6 +1246,40 @@ class Dashboard:
                 self._set_status(f"Feil ved statistikk: {error}")
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _open_report(self) -> None:
+        """Open the sheet's real PDF in whatever the machine uses for PDFs.
+
+        Builds it first if it is missing, so the button works on a scan generated before the sheet
+        existed instead of reporting a missing file. That runs off the UI thread: it recomputes the
+        scene and renders two A4 pages, a few seconds during which the window must stay responsive.
+        """
+        stem = self._selected()
+        if not stem:
+            return
+        path = pipeline.preview_dir(stem) / REPORT_PDF
+        if path.exists():
+            self._show_pdf(path)
+            return
+        self._set_status("Lager forslagsarket …")
+
+        def work() -> None:
+            try:
+                from . import report
+                built = report.build(stem, self.bin_type.get())
+                self.root.after(0, lambda: self._show_pdf(Path(built)))
+            except Exception as error:  # noqa: BLE001 - surface any failure in the status bar
+                self._set_status(f"Feil ved forslagsark: {error}")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_pdf(self, path: Path) -> None:
+        try:
+            import os
+            os.startfile(str(path))          # noqa: S606 - the OS's own PDF handler
+            self._set_status(f"Åpnet {path.name}")
+        except OSError as error:
+            self._set_status(f"Kunne ikke åpne PDF: {error}")
 
     def _annotate(self) -> None:
         stem = self._selected()

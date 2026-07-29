@@ -3,75 +3,149 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Søppelrom 3D — romoversikt</title>
+<title>Søppelrom 3D — alle rom</title>
 <link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231baf7a'/%3E%3Crect x='9' y='11' width='14' height='13' rx='2' fill='%23fcfcfb'/%3E%3Crect x='11' y='8' width='10' height='3' rx='1.5' fill='%23fcfcfb'/%3E%3C/svg%3E">
 </head>
 <body>
-<header>
-  <div>
+
+<div class="topbar">
+  <span class="mark"></span>
+  <div class="home" style="flex-direction:column;align-items:flex-start;gap:0">
     <h1>Søppelrom 3D</h1>
-    <div class="sub">velg et rom · se målene · foreslå plassering</div>
+    <div class="sub">velg et rom · se det i 3D · foreslå plassering</div>
   </div>
   <div class="spacer"></div>
-  <div class="sub" id="count"></div>
-</header>
+  <div class="sub mono" id="count"></div>
+</div>
 
 <div class="wrap">
+  <div class="kpis" id="kpis"></div>
+
   <div class="searchrow">
     <input type="search" id="q" placeholder="Søk adresse eller skann-ID" autocomplete="off">
-    <label class="sub"><input type="checkbox" id="onlyplan" checked> bare rom som kan åpnes</label>
+    <div class="pills" id="filters">
+      <button data-f="open" class="on">Kan åpnes</button>
+      <button data-f="all">Alle</button>
+      <button data-f="proposal">Har forslag</button>
+      <button data-f="todo">Ikke annotert</button>
+    </div>
   </div>
-  <div class="grid" id="grid"></div>
-  <p class="hint" id="empty" hidden>Ingen rom passer søket.</p>
+
+  <div class="roomgrid" id="grid"></div>
+  <p class="empty" id="empty" hidden>Ingen rom passer søket.</p>
 </div>
 
 <script>
+"use strict";
+
 let SCANS = [];
+let filter = "open";
+
+const $ = (id) => document.getElementById(id);
+const esc = (text) => {
+  const div = document.createElement("div");
+  div.textContent = text == null ? "" : String(text);
+  return div.innerHTML;
+};
+const fmt = (n) => n.toLocaleString("no-NO");
 
 async function load() {
-  const res = await fetch("/api/scans");
-  const data = await res.json();
+  let data;
+  try {
+    const res = await fetch("/api/scans");
+    if (!res.ok) throw new Error(res.statusText);
+    data = await res.json();
+  } catch (error) {
+    $("empty").hidden = false;
+    $("empty").textContent = `Fikk ikke listen fra serveren: ${error.message}`;
+    return;
+  }
   SCANS = data.scans;
-  document.getElementById("count").textContent =
-    `${SCANS.length} rom · ${SCANS.filter(s => s.has_plan).length} klare å åpne`;
+  renderKPIs();
   render();
 }
 
+function renderKPIs() {
+  const open = SCANS.filter((s) => s.has_plan);
+  const withMesh = SCANS.filter((s) => s.has_mesh);
+  const bins = SCANS.reduce((sum, s) => sum + (s.n_existing || 0), 0);
+  const annotated = SCANS.filter((s) => s.annotated).length;
+  const proposals = SCANS.filter((s) => s.has_proposal).length;
+
+  const tiles = [
+    ["Rom i alt", fmt(SCANS.length), `${fmt(open.length)} kan åpnes`],
+    ["Med 3D-modell", fmt(withMesh.length), withMesh.length === SCANS.length
+      ? "alle rom" : `${fmt(SCANS.length - withMesh.length)} mangler`],
+    ["Kasser registrert", fmt(bins), SCANS.length ? `${(bins / SCANS.length).toFixed(1)} per rom` : ""],
+    ["Annotert av deg", fmt(annotated),
+      SCANS.length ? `${Math.round((100 * annotated) / SCANS.length)} % av rommene` : ""],
+    ["Forslag lagret", fmt(proposals), proposals ? "venter på godkjenning" : "ingen ennå"],
+  ];
+  $("kpis").innerHTML = tiles
+    .map(([label, value, sub]) =>
+      `<div class="kpi"><div class="v">${value}</div><div class="l">${label}</div>` +
+      `<div class="s">${esc(sub)}</div></div>`)
+    .join("");
+  $("count").textContent = `${SCANS.length} rom`;
+}
+
+function passesFilter(scan) {
+  if (filter === "open") return scan.has_plan;
+  if (filter === "proposal") return scan.has_proposal;
+  if (filter === "todo") return !scan.annotated;
+  return true;
+}
+
 function render() {
-  const q = document.getElementById("q").value.trim().toLowerCase();
-  const onlyPlan = document.getElementById("onlyplan").checked;
-  const grid = document.getElementById("grid");
+  const query = $("q").value.trim().toLowerCase();
+  const grid = $("grid");
   grid.textContent = "";
   let shown = 0;
-  for (const s of SCANS) {
-    if (onlyPlan && !s.has_plan) continue;
-    if (q && !s.address.toLowerCase().includes(q) && !s.scan.toLowerCase().includes(q)) continue;
+
+  for (const scan of SCANS) {
+    if (!passesFilter(scan)) continue;
+    if (query && !scan.address.toLowerCase().includes(query)
+        && !scan.scan.toLowerCase().includes(query)) continue;
     shown++;
-    // A room without plan data is shown as a dead card WITH the reason, rather than hidden: "why is
+
+    // A room that cannot be opened is shown as a dead card WITH the reason rather than hidden: "why is
     // Odins gate not in the list" is a worse question than a greyed-out card that explains itself.
-    const el = document.createElement(s.has_plan ? "a" : "div");
-    el.className = "card" + (s.has_plan ? "" : " disabled");
-    if (s.has_plan) el.href = `/rom/${encodeURIComponent(s.scan)}`;
-    const colour = s.annotated ? "var(--new-bin)" : (s.prepared ? "var(--text)" : "var(--text-muted)");
-    el.innerHTML =
-      `<div class="addr"><span class="dot" style="background:${colour}"></span>${esc(s.address)}` +
-      (s.has_proposal ? `<span class="pill ok">forslag lagret</span>` : "") + `</div>` +
-      `<div class="meta">${s.n_existing} kasser i dag` +
-      (s.has_plan ? "" : ` · <span style="color:var(--warning)">ingen plandata — kjør «Generer bilder» i appen</span>`) +
-      `</div>`;
-    grid.appendChild(el);
+    const card = document.createElement(scan.has_plan ? "a" : "div");
+    card.className = "roomcard" + (scan.has_plan ? "" : " dead");
+    if (scan.has_plan) card.href = `/rom/${encodeURIComponent(scan.scan)}`;
+
+    // The dot says how solid the room's data is: annotated by hand, merely analysed, or neither.
+    const dot = scan.annotated ? "--bin-new" : (scan.prepared ? "--s4" : "--muted");
+    const tags = [
+      scan.has_mesh ? `<span class="tag d3">3D</span>` : "",
+      scan.has_proposal ? `<span class="tag ok">forslag</span>` : "",
+      scan.annotated ? "" : `<span class="tag warn">ikke annotert</span>`,
+    ].join("");
+
+    card.innerHTML =
+      `<div class="addr"><span class="dot" style="background:var(${dot})"></span>` +
+      `<span>${esc(scan.address)}</span></div>` +
+      `<div class="meta"><span>${scan.n_existing} kasser i dag</span>${tags}</div>` +
+      (scan.has_plan ? "" :
+        `<div class="why">ingen plandata — kjør «Generer bilder» i appen, ` +
+        `eller <span class="mono">python -m src.web_export</span></div>`);
+    grid.appendChild(card);
   }
-  document.getElementById("empty").hidden = shown > 0;
+
+  $("empty").hidden = shown > 0;
+  $("empty").textContent = "Ingen rom passer søket.";
 }
 
-function esc(s) {
-  const d = document.createElement("div");
-  d.textContent = s;
-  return d.innerHTML;
-}
+$("q").addEventListener("input", render);
+$("filters").addEventListener("click", (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  filter = button.dataset.f;
+  for (const other of event.currentTarget.children) other.classList.toggle("on", other === button);
+  render();
+});
 
-document.getElementById("q").addEventListener("input", render);
-document.getElementById("onlyplan").addEventListener("change", render);
 load();
 </script>
 </body>

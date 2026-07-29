@@ -271,6 +271,15 @@ def analyze_and_render(stem: str, bin_type: str) -> dict:
     # already holds a computed Scene; the web server must never have to rebuild one.
     web_export.write(scene, out)
 
+    # The two-page sheet for the housing cooperative. Imported here, not at module scope: report
+    # imports THIS module, so a top-level import would be circular. Failure is caught because a
+    # missing sheet must not cost the four preview PNGs that were just rendered successfully.
+    try:
+        from . import report
+        report.render_page(scene, out / "rapport.pdf")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[pipeline] {stem}: forslagsarket feilet ({type(exc).__name__}: {exc})", flush=True)
+
     stats = {
         "scan": stem,
         "bin_type": bin_type,

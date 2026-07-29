@@ -1,178 +1,377 @@
-/* Same palette as the desktop app and the rendered sheets. The values are copied from uitheme.py
-   rather than imported, because a stylesheet cannot read Python -- so when a colour changes there it
-   must change here too. Only the roles the browser actually uses are listed. */
+/* Look and feel for the browser view.
+ *
+ * The palette is the STATISTICS page's (src/stats_report.py), not the desktop app's: warm off-white
+ * paper, soft borders, 14 px rounded cards, system font. The dark app palette was copied here first
+ * and it read as a control room -- fine for a tool you stare at all day, wrong for a page a colleague
+ * opens once to look at one room.
+ *
+ * Two colour families, kept apart on purpose:
+ *   --ink / --surface / --page / --s1..s4   chrome. Free to change; nothing depends on their meaning.
+ *   --free / --occupied / --bin-* / --path  SEMANTIC. Green means free floor in the rendered PNGs,
+ *                                          in the 3D viewer and here. Changing one of these changes
+ *                                          what a picture MEANS, so they carry their own block.
+ *
+ * Both light and dark are styled: the page follows the reader's system setting, and a semantic colour
+ * is re-picked per scheme rather than reused, because a wash that reads as "pale green floor" on paper
+ * turns into mud on near-black.
+ */
+
 :root {
-    --window-bg: #0b0e11;
-    --panel-bg: #101418;
-    --panel-bg-alt: #1a1e22;
-    --panel-edge: #2a3038;
-    --divider: #22272c;
-    --text: #e8ecef;
-    --text-muted: #9aa4ad;
-    --text-hint: #6c757d;
-    --accent: #5f57d8;
-    --accent-hover: #7871de;
-    --on-accent: #ffffff;
+    color-scheme: light;
 
-    --existing-bin: #ef5b4c;
-    --new-bin: #3fc46e;
-    --entrance: #e0219a;
-    --path: #3d8bfd;
-    --free-floor: #2f6b4a;
-    --occupied-floor: #4a3b32;
-    --unknown-floor: #191d21;
-    --room-outline: #e8ecef;
-    --danger: #ef5b4c;
-    --warning: #e5b53a;
+    --page: #f3f3ef;
+    --surface: #fcfcfb;
+    --surface-2: #f7f7f3;
+    --ink: #0b0b0b;
+    --ink2: #52514e;
+    --muted: #898781;
+    --border: rgba(11, 11, 11, .10);
+    --border-strong: rgba(11, 11, 11, .20);
+    --grid: #e1e0d9;
 
-    --radius: 9px;
+    --s1: #2a78d6;
+    --s2: #eb6834;
+    --s3: #1baf7a;
+    --s4: #eda100;
+    --danger: #d64545;
+
+    /* ---- semantic: the same meanings as the rendered sheets and the 3D viewer ---- */
+    --free: #1baf7a;           /* floor that is scanned, clear and reachable */
+    --occupied: #d98757;       /* floor with something standing on it */
+    --unknown: #d8d6cd;        /* the scanner never saw this ground */
+    --path: #2a78d6;           /* the push corridor a bin can be wheeled along */
+    --bin-existing: #e0523b;   /* a bin that is there today */
+    --bin-new: #14a06e;        /* a bin we (or you) propose */
+    --entrance: #d6219a;       /* door / way in */
+    --outline: #4a4945;        /* the room's own footprint rect */
+
+    --radius: 14px;
+    --radius-sm: 9px;
     --gap: 14px;
+    --shadow: 0 1px 2px rgba(11, 11, 11, .04), 0 8px 24px rgba(11, 11, 11, .04);
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        color-scheme: dark;
+
+        --page: #0d0d0d;
+        --surface: #1a1a19;
+        --surface-2: #222220;
+        --ink: #ffffff;
+        --ink2: #c3c2b7;
+        --muted: #898781;
+        --border: rgba(255, 255, 255, .11);
+        --border-strong: rgba(255, 255, 255, .22);
+        --grid: #2c2c2a;
+
+        --s1: #3987e5;
+        --s2: #d95926;
+        --s3: #199e70;
+        --s4: #c98500;
+        --danger: #e2564f;
+
+        --free: #1f8f65;
+        --occupied: #8a5637;
+        --unknown: #2a2a27;
+        --path: #3987e5;
+        --bin-existing: #e2564f;
+        --bin-new: #22b57e;
+        --entrance: #e0219a;
+        --outline: #d8d6cd;
+
+        --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .25);
+    }
 }
 
 * { box-sizing: border-box; }
 
 body {
     margin: 0;
-    background: var(--window-bg);
-    color: var(--text);
-    font: 15px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif;
+    background: var(--page);
+    color: var(--ink);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
 }
 
-a { color: var(--accent-hover); }
+a { color: var(--s1); text-decoration: none; }
+a:hover { text-decoration: underline; }
 
-header {
+/* =============================================================== chrome */
+
+.topbar {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: var(--gap);
-    padding: 18px 20px 10px;
+    padding: 16px 22px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
     flex-wrap: wrap;
+    position: sticky;
+    top: 0;
+    z-index: 5;
 }
 
-h1 { margin: 0; font-size: 25px; font-weight: 600; letter-spacing: -0.2px; }
-.sub { color: var(--text-muted); font-size: 13px; }
+.topbar h1 { margin: 0; font-size: 19px; font-weight: 650; letter-spacing: -.2px; }
+.topbar .home { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .spacer { flex: 1; }
+.sub { color: var(--ink2); font-size: 13px; }
+.hint { color: var(--muted); font-size: 12px; }
+.mono { font-variant-numeric: tabular-nums; }
 
-/* ---- buttons: same three tiers as the desktop app, and for the same reason. A quiet button keeps
-   full-contrast text and only drops to a dimmer ring, so it can never be mistaken for a disabled
-   one -- that mix-up is exactly what had to be fixed in the tkinter version. */
+/* the little coloured lozenge in front of the site name — the only decoration on the page */
+.mark {
+    width: 26px; height: 26px; border-radius: 8px; flex: none;
+    background: linear-gradient(140deg, var(--s3), var(--s1));
+}
+
+.wrap { max-width: 1240px; margin: 0 auto; padding: 22px 20px 60px; }
+
+/* =============================================================== buttons */
+
 button {
     font: inherit;
+    font-size: 14px;
     padding: 8px 15px;
-    border-radius: var(--radius);
-    border: 1px solid var(--panel-edge);
-    background: var(--panel-bg-alt);
-    color: var(--text);
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--ink);
     cursor: pointer;
+    transition: background .12s, border-color .12s;
 }
-button:hover:not(:disabled) { background: #22262b; border-color: #39414b; }
-button:focus-visible { outline: 2px solid var(--accent-hover); outline-offset: 1px; }
-button.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: var(--on-accent);
-    font-weight: 600;
-}
-button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
-button.quiet { background: transparent; border-color: var(--divider); }
-button:disabled { color: var(--text-hint); border-color: #191d21; cursor: default; }
 
-/* ---- scan list (index) */
-.wrap { padding: 0 20px 40px; }
-.searchrow { display: flex; gap: var(--gap); align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
-input[type="search"], input[type="text"], textarea {
+button:hover:not(:disabled) { background: var(--surface-2); border-color: var(--border-strong); }
+button:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
+button.primary { background: var(--s1); border-color: var(--s1); color: #fff; font-weight: 600; }
+button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+button.quiet { background: transparent; color: var(--ink2); }
+/* A disabled button loses its pointer, not its legibility: greying the TEXT is what made quiet
+   buttons in the tkinter app read as broken. */
+button:disabled { opacity: .5; cursor: default; }
+
+.iconbtn { padding: 7px 12px; font-size: 13px; }
+
+/* pill row — the tab strip and the list filters share it */
+.pills { display: flex; gap: 7px; flex-wrap: wrap; }
+.pills button.on { background: var(--ink); border-color: var(--ink); color: var(--page); font-weight: 600; }
+
+input[type="search"], input[type="text"], textarea, select {
     font: inherit;
-    background: #0a0d10;
-    border: 1px solid var(--panel-edge);
-    color: var(--text);
-    border-radius: var(--radius);
+    font-size: 14px;
+    background: var(--page);
+    border: 1px solid var(--border);
+    color: var(--ink);
+    border-radius: var(--radius-sm);
     padding: 8px 12px;
 }
-input[type="search"] { min-width: 260px; flex: 1; max-width: 420px; }
-textarea { width: 100%; resize: vertical; min-height: 66px; }
+input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--s1); outline-offset: -1px; }
+input[type="search"] { min-width: 240px; flex: 1; max-width: 380px; }
+textarea { width: 100%; resize: vertical; min-height: 62px; }
+select { background: var(--surface); }
 
-.grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
-    gap: var(--gap);
-}
+/* =============================================================== cards */
+
 .card {
-    background: var(--panel-bg);
-    border: 1px solid var(--divider);
+    background: var(--surface);
+    border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 13px 15px;
-    text-decoration: none;
+    padding: 15px 17px;
+}
+
+.card > h2 {
+    margin: 0 0 10px;
+    font-size: 12px;
+    font-weight: 650;
+    letter-spacing: .8px;
+    text-transform: uppercase;
+    color: var(--muted);
+}
+
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 11px; margin-bottom: 18px; }
+.kpi { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 15px; }
+.kpi .v { font-size: 25px; font-weight: 680; letter-spacing: -.6px; font-variant-numeric: tabular-nums; }
+.kpi .l { font-size: 12px; color: var(--ink2); margin-top: 2px; }
+.kpi .s { font-size: 11px; color: var(--muted); margin-top: 1px; }
+
+/* =============================================================== room list */
+
+.searchrow { display: flex; gap: var(--gap); align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+
+.roomgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(268px, 1fr)); gap: 12px; }
+
+.roomcard {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
     color: inherit;
     display: block;
+    transition: border-color .12s, box-shadow .14s, transform .14s;
 }
-.card:hover { border-color: var(--panel-edge); background: #12171b; }
-.card.disabled { opacity: 0.55; cursor: default; }
-.card .addr { font-weight: 600; }
-.card .meta { color: var(--text-muted); font-size: 13px; margin-top: 3px; }
-.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+a.roomcard:hover { border-color: var(--border-strong); box-shadow: var(--shadow); transform: translateY(-1px); text-decoration: none; }
+.roomcard.dead { opacity: .62; }
+.roomcard .addr { font-weight: 620; display: flex; align-items: center; gap: 7px; line-height: 1.3; }
+.roomcard .meta { color: var(--ink2); font-size: 13px; margin-top: 5px; display: flex; gap: 10px; flex-wrap: wrap; }
+.roomcard .why { color: var(--s2); font-size: 12px; margin-top: 6px; }
 
-.pill {
-    display: inline-block;
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+
+.tag {
     font-size: 11px;
-    padding: 1px 7px;
+    padding: 2px 8px;
     border-radius: 999px;
-    border: 1px solid var(--panel-edge);
-    color: var(--text-muted);
-    margin-left: 6px;
+    border: 1px solid var(--border);
+    color: var(--ink2);
+    white-space: nowrap;
 }
-.pill.ok { color: var(--new-bin); border-color: #2c5a3f; }
-.pill.warn { color: var(--warning); border-color: #5a4a1e; }
+.tag.ok { color: var(--free); border-color: color-mix(in srgb, var(--free) 40%, transparent); }
+.tag.warn { color: var(--s4); border-color: color-mix(in srgb, var(--s4) 40%, transparent); }
+.tag.d3 { color: var(--s1); border-color: color-mix(in srgb, var(--s1) 40%, transparent); }
 
-/* ---- plan page */
-.layout { display: grid; grid-template-columns: 1fr 330px; gap: var(--gap); padding: 0 20px 24px; }
-@media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+.empty { text-align: center; color: var(--muted); padding: 50px 20px; }
+
+/* =============================================================== room page */
+
+.roomlayout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 336px;
+    gap: var(--gap);
+    padding: var(--gap) 20px 24px;
+    align-items: start;
+}
+@media (max-width: 980px) { .roomlayout { grid-template-columns: minmax(0, 1fr); } }
 
 .stage {
-    background: var(--panel-bg);
-    border: 1px solid var(--divider);
+    background: var(--surface);
+    border: 1px solid var(--border);
     border-radius: var(--radius);
     overflow: hidden;
     position: relative;
-    min-height: 420px;
+    /* Tall enough that a room is readable, short enough that the toolbar and the first sidebar card
+       are on screen together on a laptop. */
+    height: clamp(420px, calc(100vh - 210px), 780px);
 }
-canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
-canvas.dragging { cursor: grabbing; }
+.stage canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.stage canvas.grabbing { cursor: grabbing; }
+.stage canvas.overbin { cursor: grab; }
+
+/* the view that is not showing is display:none, so its canvas keeps its size and does not reflow */
+.viewpane { position: absolute; inset: 0; }
+.viewpane[hidden] { display: none; }
+
+.stagebar {
+    position: absolute;
+    left: 12px; top: 12px; right: 12px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+    pointer-events: none;
+    z-index: 2;
+}
+.stagebar > * { pointer-events: auto; }
+/* Floating controls sit on top of the drawing, so they need their own opaque backing to stay legible
+   over a bright wall or a dark corner. */
+.stagebar button, .stagebar .chip {
+    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow);
+}
+.chip {
+    font-size: 12px;
+    color: var(--ink2);
+    padding: 6px 11px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+}
+
+.stagestatus {
+    position: absolute;
+    left: 12px; bottom: 12px;
+    font-size: 12px;
+    color: var(--ink2);
+    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 6px 12px;
+    z-index: 2;
+    max-width: calc(100% - 24px);
+}
 
 .side { display: flex; flex-direction: column; gap: 12px; }
-.panel {
-    background: var(--panel-bg);
-    border: 1px solid var(--divider);
-    border-radius: var(--radius);
-    padding: 13px 15px;
-}
-.panel h2 { margin: 0 0 9px; font-size: 12px; letter-spacing: 0.9px; text-transform: uppercase; color: var(--text-muted); font-weight: 600; }
 
-.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 14px; }
-.stat .k { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.6px; }
-.stat .v { font-weight: 600; }
+.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+.stat .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+.stat .v { font-weight: 620; font-variant-numeric: tabular-nums; }
 
-.legend { display: flex; flex-direction: column; gap: 5px; font-size: 13px; color: var(--text-muted); }
-.legend span.sw { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 7px; vertical-align: -1px; }
-
-.binlist { display: flex; flex-direction: column; gap: 6px; }
+.binlist { display: flex; flex-direction: column; gap: 5px; }
 .binrow {
-    display: flex; align-items: center; gap: 8px;
-    padding: 6px 8px; border-radius: 7px; border: 1px solid transparent; cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 7px 9px;
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    cursor: pointer;
 }
-.binrow:hover { background: var(--panel-bg-alt); }
-.binrow.sel { border-color: var(--accent); background: #171a2c; }
+.binrow:hover { background: var(--surface-2); }
+.binrow.sel { border-color: var(--s1); background: color-mix(in srgb, var(--s1) 9%, transparent); }
 .binrow .name { flex: 1; font-size: 14px; }
-.binrow .bad { color: var(--danger); font-size: 12px; }
-.binrow button { padding: 2px 8px; font-size: 12px; border-radius: 6px; }
+.binrow .size { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.binrow .bad { color: var(--danger); font-weight: 700; }
 
-.problems { list-style: none; margin: 8px 0 0; padding: 0; font-size: 13px; }
-.problems li { color: var(--warning); margin-bottom: 4px; }
-.problems li.ok { color: var(--new-bin); }
+.verdict { display: flex; align-items: flex-start; gap: 8px; font-size: 14px; }
+.verdict .light { width: 9px; height: 9px; border-radius: 50%; margin-top: 6px; flex: none; background: var(--muted); }
+.verdict.good .light { background: var(--free); }
+.verdict.bad .light { background: var(--danger); }
+.verdict.busy .light { background: var(--s4); }
 
-.toolbar { display: flex; gap: 8px; flex-wrap: wrap; padding: 0 20px 12px; align-items: center; }
-select {
-    font: inherit; background: var(--panel-bg-alt); color: var(--text);
-    border: 1px solid var(--panel-edge); border-radius: var(--radius); padding: 8px 10px;
-}
-.hint { color: var(--text-hint); font-size: 12px; }
-.saved { color: var(--new-bin); font-size: 13px; }
+.problems { list-style: none; margin: 9px 0 0; padding: 0; font-size: 13px; }
+.problems li { color: var(--ink2); margin-bottom: 5px; padding-left: 13px; position: relative; }
+.problems li::before { content: "→"; position: absolute; left: 0; color: var(--s2); }
+.problems li.ok::before { content: "✓"; color: var(--free); }
+
+.legend { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; font-size: 13px; color: var(--ink2); }
+.legend div { display: flex; align-items: center; gap: 7px; }
+.legend .sw { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+
+.saved { color: var(--free); font-size: 13px; }
 .err { color: var(--danger); font-size: 13px; }
+
+.keys { font-size: 12px; color: var(--ink2); display: flex; flex-direction: column; gap: 5px; }
+.keys div { display: flex; gap: 8px; align-items: baseline; }
+kbd {
+    font: inherit;
+    font-size: 11px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    padding: 1px 6px;
+    color: var(--ink);
+    white-space: nowrap;
+}
+
+/* full-stage message: the room could not be opened, or 3D is still downloading */
+.stagemsg {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-content: center;
+    text-align: center;
+    padding: 30px;
+    gap: 8px;
+    color: var(--ink2);
+    background: var(--surface);
+    z-index: 3;
+}
+.stagemsg strong { color: var(--ink); font-size: 16px; font-weight: 620; }
+.stagemsg[hidden] { display: none; }
+
+.bar { height: 4px; border-radius: 999px; background: var(--grid); overflow: hidden; width: 220px; margin: 4px auto 0; }
+.bar i { display: block; height: 100%; background: var(--s1); width: 0; transition: width .2s; }

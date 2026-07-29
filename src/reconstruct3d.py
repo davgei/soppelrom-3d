@@ -422,19 +422,14 @@ class ReconstructionViewer(place3d.PlacementViewer):
 # headless matplotlib snapshot (verification + a quick still)
 # ---------------------------------------------------------------------------
 
-def render_snapshot(scene, out_png: Path) -> Path:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+def _draw_room_3d(ax, model, scene, *, show_path: bool = True) -> None:
+    """Draw one room onto a 3D axes. Split out of render_snapshot so several camera angles can be
+    rendered from ONE built model -- build_room_model is the expensive half, and the report needs
+    three views of the same room."""
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-
-    model = build_room_model(scene)
 
     def to_plot(quad: np.ndarray) -> list[tuple[float, float, float]]:
         return [(p[0], p[2], p[1]) for p in quad]  # X, Z, Y(up)
-
-    fig = plt.figure(figsize=(11, 8), dpi=140)
-    ax = fig.add_subplot(111, projection="3d")
 
     floors = [to_plot(q) for q in floor_quads(model)]
     if floors:
@@ -464,6 +459,52 @@ def render_snapshot(scene, out_png: Path) -> Path:
 
     lo, hi = _world_bounds(model)
     ax.set_box_aspect((max(hi[0] - lo[0], 0.1), max(hi[2] - lo[2], 0.1), max(hi[1] - lo[1], 0.1)))
+
+
+# Camera angles for the proposal sheet: two obliques from opposite corners plus one from high up.
+# Opposite sides on purpose -- one oblique always hides whatever stands behind the near wall, and a
+# resident reading the sheet has to be able to find the spot from the doorway they actually use.
+# 34 degrees, not the 20 tried first: at 20 the room is nearly edge-on and the floor reads as a line,
+# so where a bin stands relative to the walls is impossible to see.
+REPORT_VIEWS: tuple[tuple[str, float, float], ...] = (
+    ("3d_a.png", 34.0, -60.0),
+    ("3d_b.png", 34.0, 120.0),
+    ("3d_c.png", 70.0, -60.0),
+)
+
+
+def _crop_white(path: Path, pad: int = 6) -> None:
+    """Crop a saved PNG to its non-white content.
+
+    bbox_inches="tight" does not help on a 3D axes: the tight bbox is the AXES rectangle, which after
+    set_axis_off() is still the full cube the projection could occupy, so the room ended up filling
+    roughly 40% of the image with white on all sides. Measuring the actual pixels is the only way to
+    frame it.
+    """
+    from PIL import Image, ImageChops
+
+    with Image.open(path) as image:
+        rgb = image.convert("RGB")
+        background = Image.new("RGB", rgb.size, (255, 255, 255))
+        box = ImageChops.difference(rgb, background).getbbox()
+        if box is None:
+            return                        # nothing was drawn; leave the file alone
+        left, top, right, bottom = box
+        left, top = max(left - pad, 0), max(top - pad, 0)
+        right, bottom = min(right + pad, rgb.width), min(bottom + pad, rgb.height)
+        rgb.crop((left, top, right, bottom)).save(path)
+
+
+def render_snapshot(scene, out_png: Path) -> Path:
+    """The single labelled still used for verification and the dashboard's 3D preview."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    model = build_room_model(scene)
+    fig = plt.figure(figsize=(11, 8), dpi=140)
+    ax = fig.add_subplot(111, projection="3d")
+    _draw_room_3d(ax, model, scene)
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Z (m)")
     ax.set_zlabel("høyde (m)")
@@ -475,6 +516,39 @@ def render_snapshot(scene, out_png: Path) -> Path:
     fig.savefig(out_png, facecolor="white")
     plt.close(fig)
     return out_png
+
+
+def render_report_views(scene, out_dir: Path) -> list[Path]:
+    """One clean PNG per REPORT_VIEWS angle, for the proposal sheet.
+
+    Clean means no axes, no tick labels, no title: on the sheet those are captions set in the
+    document's own typeface, and matplotlib's 3D axis furniture next to them looks like a debug plot.
+    The room model is built once and redrawn per angle -- building it is the slow part, the quads
+    themselves are cheap to re-wrap (a Poly3DCollection cannot be shared between axes).
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    model = build_room_model(scene)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for name, elev, azim in REPORT_VIEWS:
+        fig = plt.figure(figsize=(5.0, 4.0), dpi=190)
+        ax = fig.add_subplot(111, projection="3d")
+        _draw_room_3d(ax, model, scene)
+        ax.view_init(elev=elev, azim=azim)
+        ax.set_axis_off()
+        # A tight margin: the sheet frames these itself, so matplotlib's default padding would only
+        # shrink the room inside its own box.
+        fig.subplots_adjust(left=0.0, right=1.0, top=1.0, bottom=0.0)
+        path = out_dir / name
+        fig.savefig(path, facecolor="white")
+        plt.close(fig)
+        _crop_white(path)
+        written.append(path)
+    return written
 
 
 def main() -> None:

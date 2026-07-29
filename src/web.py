@@ -1,18 +1,21 @@
-"""Browser view of the waste rooms: look at a room, move the bins, propose new ones.
+"""Browser view of the waste rooms: look at a room in 3D, move the bins, propose new ones.
 
 Runs locally (python -m src.web) and serves the SAME data the desktop app works from. It exists so
-people who will never install open3d can see what a room looks like, try a layout and hand it back.
+people who will never install open3d can walk around a room, try a layout and hand it back. The 3D view
+shows what src.place3d shows, in the same colours; a plan tab draws the room from above for the
+measuring that perspective makes hard.
 
 What it deliberately does NOT do:
 
-  * It never annotates. Annotation is where ground truth comes from and it needs the 3D view; this is
-    a plan view for proposing furniture, not for labelling what is already there.
+  * It never annotates. Annotation is where ground truth comes from and it needs the full 3D tool with
+    the point cloud; this view is for proposing furniture, not for labelling what is already there.
   * It never writes to outputs/annotations or outputs/entrances. A layout from the browser lands in
     outputs/web_proposals/<stem>.json and stays a SUGGESTION until it is approved in the dashboard.
     Nothing here can approve anything.
   * It never recomputes a scene. compute_scene() reads the point cloud and re-runs placement -- too
-    slow for a request and it drags open3d in. The browser is served the plan.json + masks.png that
-    analyze_and_render already wrote, so a scan must have been generated once before it shows up.
+    slow for a request and it drags open3d in. The browser is served the plan.json + masks.png +
+    room.glb that analyze_and_render already wrote, so a scan must have been generated once (or run
+    through `python -m src.web_export`) before it shows up.
 
 Where the authority sits. The browser does instant checks while you drag (is this corner on scanned
 floor, does it overlap another bin) by looking up the mask bitmap it already has. The question that
@@ -258,7 +261,7 @@ def create_app() -> Flask:
 
     @app.get("/rom/<stem>")
     def room_page(stem: str):
-        return send_file(STATIC_DIR / "plan.html")
+        return send_file(STATIC_DIR / "room.html")
 
     @app.get("/api/scans")
     def api_scans():
@@ -273,6 +276,9 @@ def create_app() -> Flask:
                 "annotated": pipeline.is_annotated(stem),
                 "prepared": pipeline.is_prepared(stem),
                 "has_plan": has_plan,
+                # Checked on disk rather than read out of plan.json: the list is 322 rooms and opening
+                # every plan to look at one key would make the front page wait on 322 file reads.
+                "has_mesh": (pipeline.preview_dir(stem) / web_export.MESH_NAME).exists(),
                 "n_existing": pipeline.existing_bin_count(stem) if pipeline.is_prepared(stem) else 0,
                 "has_proposal": (PROPOSAL_DIR / f"{stem}.json").exists(),
             })
@@ -298,6 +304,18 @@ def create_app() -> Flask:
         if not path.exists():
             abort(404)
         return send_file(path, mimetype="image/png")
+
+    @app.get("/api/mesh/<stem>")
+    def api_mesh(stem: str):
+        """The scan mesh as .glb for the 3D view.
+
+        conditional=True lets Flask answer a repeat visit with 304 Not Modified off the file's mtime,
+        so re-opening a room does not re-send a couple of megabytes.
+        """
+        path = pipeline.preview_dir(stem) / web_export.MESH_NAME
+        if not path.exists():
+            abort(404, f"{stem} har ingen 3D-modell — kjør «python -m src.web_export» for skannet")
+        return send_file(path, mimetype="model/gltf-binary", conditional=True)
 
     @app.post("/api/validate/<stem>")
     def api_validate(stem: str):
