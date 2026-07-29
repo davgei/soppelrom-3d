@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="no">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Søppelrom 3D — romoversikt</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header>
+  <div>
+    <h1>Søppelrom 3D</h1>
+    <div class="sub">velg et rom · se målene · foreslå plassering</div>
+  </div>
+  <div class="spacer"></div>
+  <div class="sub" id="count"></div>
+</header>
+
+<div class="wrap">
+  <div class="searchrow">
+    <input type="search" id="q" placeholder="Søk adresse eller skann-ID" autocomplete="off">
+    <label class="sub"><input type="checkbox" id="onlyplan" checked> bare rom som kan åpnes</label>
+  </div>
+  <div class="grid" id="grid"></div>
+  <p class="hint" id="empty" hidden>Ingen rom passer søket.</p>
+</div>
+
+<script>
+let SCANS = [];
+
+async function load() {
+  const res = await fetch("/api/scans");
+  const data = await res.json();
+  SCANS = data.scans;
+  document.getElementById("count").textContent =
+    `${SCANS.length} rom · ${SCANS.filter(s => s.has_plan).length} klare å åpne`;
+  render();
+}
+
+function render() {
+  const q = document.getElementById("q").value.trim().toLowerCase();
+  const onlyPlan = document.getElementById("onlyplan").checked;
+  const grid = document.getElementById("grid");
+  grid.textContent = "";
+  let shown = 0;
+  for (const s of SCANS) {
+    if (onlyPlan && !s.has_plan) continue;
+    if (q && !s.address.toLowerCase().includes(q) && !s.scan.toLowerCase().includes(q)) continue;
+    shown++;
+    // A room without plan data is shown as a dead card WITH the reason, rather than hidden: "why is
+    // Odins gate not in the list" is a worse question than a greyed-out card that explains itself.
+    const el = document.createElement(s.has_plan ? "a" : "div");
+    el.className = "card" + (s.has_plan ? "" : " disabled");
+    if (s.has_plan) el.href = `/rom/${encodeURIComponent(s.scan)}`;
+    const colour = s.annotated ? "var(--new-bin)" : (s.prepared ? "var(--text)" : "var(--text-muted)");
+    el.innerHTML =
+      `<div class="addr"><span class="dot" style="background:${colour}"></span>${esc(s.address)}` +
+      (s.has_proposal ? `<span class="pill ok">forslag lagret</span>` : "") + `</div>` +
+      `<div class="meta">${s.n_existing} kasser i dag` +
+      (s.has_plan ? "" : ` · <span style="color:var(--warning)">ingen plandata — kjør «Generer bilder» i appen</span>`) +
+      `</div>`;
+    grid.appendChild(el);
+  }
+  document.getElementById("empty").hidden = shown > 0;
+}
+
+function esc(s) {
+  const d = document.createElement("div");
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+document.getElementById("q").addEventListener("input", render);
+document.getElementById("onlyplan").addEventListener("change", render);
+load();
+</script>
+</body>
+</html>

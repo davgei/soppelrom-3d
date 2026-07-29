@@ -11,7 +11,11 @@ outputs/*
 *.pth
 *.onnx
 
-# ... EXCEPT the human work + the trained models, which travel with the repo
+# ... EXCEPT the human work + the trained models, which travel with the repo.
+# web_proposals is somebody's suggestion typed into the browser view — human work like the rest, and
+# it has to reach the machine where it gets reviewed. It is never promoted automatically: only the
+# desktop app turns a proposal into an annotation.
 !outputs/annotations/
 !outputs/entrances/
+!outputs/web_proposals/
 !models/*.pt

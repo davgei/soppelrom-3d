@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import open3d as o3d
 
-from . import backbone, doors, freespace, placement, render, set_entrance, style
+from . import backbone, doors, freespace, placement, render, set_entrance, style, web_export
 from .annotations import BIN_TYPES, load_annotations
 from .loader import load_point_cloud
 from .reconstruct import ReconstructionConfig
@@ -47,19 +47,53 @@ def existing_bin_count(stem: str) -> int:
     return len(boxes)
 
 
-def load_existing_bins(stem: str, rotation: np.ndarray) -> list[tuple[float, float, float, float, float]]:
+def existing_bins_source(stem: str) -> Path | None:
+    """Where a scan's existing bins come from: hand annotations if they exist, else the detector's
+    proposals. One function so every reader of "the existing bins" agrees on the precedence."""
     annotated = ANNOTATION_DIR / f"{stem}.json"
+    if annotated.exists():
+        return annotated
     proposals = CACHE_ROOT / stem / "proposals.json"
-    path = annotated if annotated.exists() else (proposals if proposals.exists() else None)
+    return proposals if proposals.exists() else None
+
+
+def existing_bin_types(stem: str) -> list[str]:
+    """Bin type per existing bin, in the SAME order load_existing_bins returns them.
+
+    load_existing_bins reduces each box to geometry and drops the type, which is fine for placement
+    (it only needs footprints) but leaves anything that shows the bins to a person with nothing to
+    label them -- the browser listed five bins as "eksisterende" five times.
+    """
+    path = existing_bins_source(stem)
+    if path is None:
+        return []
+    _, boxes = load_annotations(path)
+    return [box.bin_type or "ukjent" for box in boxes]
+
+
+def load_existing_bins(stem: str, rotation: np.ndarray) -> list[tuple[float, float, float, float, float]]:
+    """Existing bins as (cx, cz, length, width, yaw_deg), length along yaw.
+
+    The +90 when the sides swap is load-bearing. Callers (placement._box_mask -> cv2.boxPoints) read
+    the FIRST size as lying along yaw, while BinBox.extent[0] is the side along yaw -- so reporting
+    max(extent) first without turning the box also turns the footprint 90 degrees. 207 of 386
+    annotated boxes (54%) have the long side second, and their blocked footprint overlapped what was
+    actually drawn by an IoU of only 0.561; with the turn it is 0.894, the same as the boxes that never
+    needed swapping (0.899, unchanged by this). Worst case was an 8.2 m bin row at IoU 0.136 -- new
+    bins could be proposed straight through a row of real ones, and the push path routed through it.
+    """
+    path = existing_bins_source(stem)
     if path is None:
         return []
     _, boxes = load_annotations(path)
     result = []
     for box in boxes:
         center = rotation @ np.asarray(box.center)
-        length = max(box.extent[0], box.extent[2])
-        width = min(box.extent[0], box.extent[2])
-        result.append((float(center[0]), float(center[2]), float(length), float(width), float(box.yaw_deg)))
+        along, across = float(box.extent[0]), float(box.extent[2])
+        yaw = float(box.yaw_deg)
+        if across > along:
+            along, across, yaw = across, along, yaw + 90.0
+        result.append((float(center[0]), float(center[2]), along, across, yaw))
     return result
 
 
@@ -233,6 +267,9 @@ def analyze_and_render(stem: str, bin_type: str) -> dict:
     )
     render.before_after(scene.scene_vis, scene.result, out / "before_after.png",
                         title=title, note=stem)
+    # plan.json + masks.png for the browser view. Written here because this is the only pass that
+    # already holds a computed Scene; the web server must never have to rebuild one.
+    web_export.write(scene, out)
 
     stats = {
         "scan": stem,

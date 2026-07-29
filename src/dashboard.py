@@ -505,11 +505,15 @@ class Dashboard:
             ("active", T.HOVER_BG, T.mix("panel_edge", "text", 0.3)),
             ("focus", T.PANEL_BG_ALT, focus),
         ))
-        # the quiet tier is invisible at rest -- the label alone -- and only grows a surface under the
-        # pointer, which is what keeps four rare actions from adding four more boxes to the screen
-        quiet = Tier(fill=T.WINDOW_BG, edge=T.WINDOW_BG, states=(
-            ("disabled", T.WINDOW_BG, T.WINDOW_BG),
-            ("pressed", T.HOVER_BG, T.PANEL_EDGE),
+        # The quiet tier is OUTLINED, not invisible. The first version had no surface and muted
+        # lettering at rest, which is exactly how ttk draws a disabled button -- "Statistikk" (live)
+        # and "Forbered" (disabled) were nearly indistinguishable, and the colour only looked right
+        # once the pointer arrived. Quieter than secondary now means a dimmer ring and no fill, never
+        # a dimmer label: the hairline says "button" and full-contrast text says "enabled".
+        quiet = Tier(fill=T.WINDOW_BG, edge=T.DIVIDER, states=(
+            # disabled is the ONLY state that dims the ring, so it stays the odd one out
+            ("disabled", T.WINDOW_BG, T.mix("divider", "window_bg", 0.6)),
+            ("pressed", T.ACTIVE_BG, T.PANEL_EDGE),
             ("active", T.PANEL_BG_ALT, T.PANEL_EDGE),
             ("focus", T.WINDOW_BG, focus),
         ))
@@ -517,7 +521,7 @@ class Dashboard:
         for name, tier, fg, fg_hover, font_key in (
             ("Primary.TButton", primary, T.TEXT_ON_ACCENT, T.TEXT_ON_ACCENT, "bodysemi"),
             ("Secondary.TButton", secondary, T.TEXT, T.TEXT, "body"),
-            ("Quiet.TButton", quiet, T.TEXT_MUTED, T.TEXT, "body"),
+            ("Quiet.TButton", quiet, T.TEXT, T.TEXT, "body"),
         ):
             self._rounded.button_style(name, tier, radius=radius, behind=T.WINDOW_BG,
                                        foreground=fg, foreground_hover=fg_hover,

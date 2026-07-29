@@ -1,0 +1,178 @@
+/* Same palette as the desktop app and the rendered sheets. The values are copied from uitheme.py
+   rather than imported, because a stylesheet cannot read Python -- so when a colour changes there it
+   must change here too. Only the roles the browser actually uses are listed. */
+:root {
+    --window-bg: #0b0e11;
+    --panel-bg: #101418;
+    --panel-bg-alt: #1a1e22;
+    --panel-edge: #2a3038;
+    --divider: #22272c;
+    --text: #e8ecef;
+    --text-muted: #9aa4ad;
+    --text-hint: #6c757d;
+    --accent: #5f57d8;
+    --accent-hover: #7871de;
+    --on-accent: #ffffff;
+
+    --existing-bin: #ef5b4c;
+    --new-bin: #3fc46e;
+    --entrance: #e0219a;
+    --path: #3d8bfd;
+    --free-floor: #2f6b4a;
+    --occupied-floor: #4a3b32;
+    --unknown-floor: #191d21;
+    --room-outline: #e8ecef;
+    --danger: #ef5b4c;
+    --warning: #e5b53a;
+
+    --radius: 9px;
+    --gap: 14px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    background: var(--window-bg);
+    color: var(--text);
+    font: 15px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+a { color: var(--accent-hover); }
+
+header {
+    display: flex;
+    align-items: baseline;
+    gap: var(--gap);
+    padding: 18px 20px 10px;
+    flex-wrap: wrap;
+}
+
+h1 { margin: 0; font-size: 25px; font-weight: 600; letter-spacing: -0.2px; }
+.sub { color: var(--text-muted); font-size: 13px; }
+.spacer { flex: 1; }
+
+/* ---- buttons: same three tiers as the desktop app, and for the same reason. A quiet button keeps
+   full-contrast text and only drops to a dimmer ring, so it can never be mistaken for a disabled
+   one -- that mix-up is exactly what had to be fixed in the tkinter version. */
+button {
+    font: inherit;
+    padding: 8px 15px;
+    border-radius: var(--radius);
+    border: 1px solid var(--panel-edge);
+    background: var(--panel-bg-alt);
+    color: var(--text);
+    cursor: pointer;
+}
+button:hover:not(:disabled) { background: #22262b; border-color: #39414b; }
+button:focus-visible { outline: 2px solid var(--accent-hover); outline-offset: 1px; }
+button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--on-accent);
+    font-weight: 600;
+}
+button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+button.quiet { background: transparent; border-color: var(--divider); }
+button:disabled { color: var(--text-hint); border-color: #191d21; cursor: default; }
+
+/* ---- scan list (index) */
+.wrap { padding: 0 20px 40px; }
+.searchrow { display: flex; gap: var(--gap); align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+input[type="search"], input[type="text"], textarea {
+    font: inherit;
+    background: #0a0d10;
+    border: 1px solid var(--panel-edge);
+    color: var(--text);
+    border-radius: var(--radius);
+    padding: 8px 12px;
+}
+input[type="search"] { min-width: 260px; flex: 1; max-width: 420px; }
+textarea { width: 100%; resize: vertical; min-height: 66px; }
+
+.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+    gap: var(--gap);
+}
+.card {
+    background: var(--panel-bg);
+    border: 1px solid var(--divider);
+    border-radius: var(--radius);
+    padding: 13px 15px;
+    text-decoration: none;
+    color: inherit;
+    display: block;
+}
+.card:hover { border-color: var(--panel-edge); background: #12171b; }
+.card.disabled { opacity: 0.55; cursor: default; }
+.card .addr { font-weight: 600; }
+.card .meta { color: var(--text-muted); font-size: 13px; margin-top: 3px; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+
+.pill {
+    display: inline-block;
+    font-size: 11px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    border: 1px solid var(--panel-edge);
+    color: var(--text-muted);
+    margin-left: 6px;
+}
+.pill.ok { color: var(--new-bin); border-color: #2c5a3f; }
+.pill.warn { color: var(--warning); border-color: #5a4a1e; }
+
+/* ---- plan page */
+.layout { display: grid; grid-template-columns: 1fr 330px; gap: var(--gap); padding: 0 20px 24px; }
+@media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+
+.stage {
+    background: var(--panel-bg);
+    border: 1px solid var(--divider);
+    border-radius: var(--radius);
+    overflow: hidden;
+    position: relative;
+    min-height: 420px;
+}
+canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+canvas.dragging { cursor: grabbing; }
+
+.side { display: flex; flex-direction: column; gap: 12px; }
+.panel {
+    background: var(--panel-bg);
+    border: 1px solid var(--divider);
+    border-radius: var(--radius);
+    padding: 13px 15px;
+}
+.panel h2 { margin: 0 0 9px; font-size: 12px; letter-spacing: 0.9px; text-transform: uppercase; color: var(--text-muted); font-weight: 600; }
+
+.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 14px; }
+.stat .k { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.6px; }
+.stat .v { font-weight: 600; }
+
+.legend { display: flex; flex-direction: column; gap: 5px; font-size: 13px; color: var(--text-muted); }
+.legend span.sw { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 7px; vertical-align: -1px; }
+
+.binlist { display: flex; flex-direction: column; gap: 6px; }
+.binrow {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 8px; border-radius: 7px; border: 1px solid transparent; cursor: pointer;
+}
+.binrow:hover { background: var(--panel-bg-alt); }
+.binrow.sel { border-color: var(--accent); background: #171a2c; }
+.binrow .name { flex: 1; font-size: 14px; }
+.binrow .bad { color: var(--danger); font-size: 12px; }
+.binrow button { padding: 2px 8px; font-size: 12px; border-radius: 6px; }
+
+.problems { list-style: none; margin: 8px 0 0; padding: 0; font-size: 13px; }
+.problems li { color: var(--warning); margin-bottom: 4px; }
+.problems li.ok { color: var(--new-bin); }
+
+.toolbar { display: flex; gap: 8px; flex-wrap: wrap; padding: 0 20px 12px; align-items: center; }
+select {
+    font: inherit; background: var(--panel-bg-alt); color: var(--text);
+    border: 1px solid var(--panel-edge); border-radius: var(--radius); padding: 8px 10px;
+}
+.hint { color: var(--text-hint); font-size: 12px; }
+.saved { color: var(--new-bin); font-size: 13px; }
+.err { color: var(--danger); font-size: 13px; }
