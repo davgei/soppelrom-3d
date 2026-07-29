@@ -63,18 +63,75 @@ def load_existing_bins(stem: str, rotation: np.ndarray) -> list[tuple[float, flo
     return result
 
 
-def _address(archive) -> str | None:
-    try:
-        location = archive.gps(archive.timestamps[0])
-        place = location.get("placemark", {}) if location else {}
-        parts = [
-            f"{place.get('thoroughfare', '')} {place.get('subThoroughfare', '')}".strip(),
-            f"{place.get('postalCode', '')} {place.get('locality', '')}".strip(),
-        ]
-        joined = ", ".join(p for p in parts if p)
-        return joined or None
-    except Exception:
+def _placemark_address(place: dict) -> str | None:
+    """Street-level address, or None.
+
+    A placemark with a postal code but no thoroughfare produces "0171 Oslo", which is not an address:
+    two scans in the same postal area then get the same label and become indistinguishable in the
+    dashboard list. Callers fall back to the scan id, which is at least unique, so a street name is
+    required rather than accepted-if-present.
+    """
+    street = f"{place.get('thoroughfare', '')} {place.get('subThoroughfare', '')}".strip()
+    if not street:
         return None
+    area = f"{place.get('postalCode', '')} {place.get('locality', '')}".strip()
+    return f"{street}, {area}" if area else street
+
+
+def _address(archive) -> str | None:
+    """The scan's own address, from whichever keyframe iOS managed to geocode.
+
+    Every location json is tried, not only the first paired keyframe's: Polycam writes
+    keyframes/location/<ts>.json only for frames that had a fix with a reverse-geocoded placemark, and
+    reading just timestamps[0] reported "no address" for scans that carry one a few frames later.
+    """
+    try:
+        for timestamp in archive.timestamps:
+            location = archive.gps(timestamp)
+            if not location:
+                continue
+            address = _placemark_address(location.get("placemark") or {})
+            if address:
+                return address
+    except Exception:      # noqa: BLE001 - a malformed archive just has no address
+        return None
+    return None
+
+
+def address_of(stem: str) -> str | None:
+    """Address for a scan WITHOUT running the analysis, remembered in the cache after the first read.
+
+    The dashboard lists every scan and used to fall back to the raw scan id for any scan whose
+    previews had not been generated yet -- 217 of 322 after the last download -- so the list you pick
+    what to annotate from was a column of "11807_20260727T1110_OF". The address is in the scan
+    archive itself and costs one small json to read, so it never needed the analysis to have run.
+    """
+    cached = CACHE_ROOT / stem / "address.json"
+    if cached.exists():
+        try:
+            return json.loads(cached.read_text(encoding="utf-8")).get("address")
+        except (OSError, ValueError):
+            pass                      # unreadable cache: fall through and re-read the archive
+    zip_path = RAW_DIR / f"{stem}.zip"
+    if not zip_path.exists():
+        return None
+    from . import scan_io           # local: keeps cv2 off the import path for callers that never ask
+    try:
+        archive = scan_io.ScanArchive(zip_path)
+    except Exception:                # noqa: BLE001 - unreadable zip is not worth crashing the list
+        return None
+    try:
+        address = _address(archive)
+    finally:
+        archive.close()
+    try:
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        # A null is cached too: without it, every dashboard start would re-open every zip that simply
+        # has no GPS in it.
+        cached.write_text(json.dumps({"address": address}), encoding="utf-8")
+    except OSError:
+        pass
+    return address
 
 
 @dataclass

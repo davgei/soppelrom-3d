@@ -44,6 +44,7 @@ from . import pipeline, ply_align
 from . import uitheme as T
 from .annotations import BIN_TYPES
 from .set_entrance import ENTRANCE_DIR
+from .tkround import RoundedStyles, Tier
 
 VIEWS = [
     ("Rom + mål", "room_topdown.png"),
@@ -52,7 +53,16 @@ VIEWS = [
     ("I dag / forslag", "before_after.png"),
 ]
 
-# The "3D" column in the scan list. Symbols come from ply_align so they cannot drift apart.
+# The status column used to spell out "✓ annotert" / "klar" / "rå" on every row, which over 322 scans
+# is 322 repetitions of three words competing with the addresses for attention. A dot in the row's own
+# colour says the same thing, so the words move to the legend below the list -- once each, and there
+# each needs its own Label because a ttk.Label has a single foreground colour.
+STATUS_DOT = "●"
+STATUS_LEGEND: tuple[tuple[str, str], ...] = (
+    ("annotert", "success"), ("klar", "text"), ("rå", "text_muted"),
+)
+
+# The "3D" column. Symbols come from ply_align so they cannot drift apart.
 PLY_LEGEND = (
     f"{ply_align.PLY_OK} Polycam-sky      {ply_align.PLY_UNREGISTERED} ikke registrert\n"
     f"{ply_align.PLY_REJECTED} avvist      (tomt = ingen eksport)"
@@ -219,6 +229,12 @@ class Dashboard:
         self._pads: list[tuple[tk.Misc, str, str]] = []
         self._chips: dict[str, tuple[ttk.Frame, ttk.Label]] = {}
         self._bars: list[WrapBar] = []
+        # Rounded-button bitmaps outlive a rescale: element names are global to the interpreter, so
+        # the registry has to be created once and reused rather than rebuilt in every _build_style.
+        self._rounded: RoundedStyles | None = None
+        self._rounded_style: ttk.Style | None = None
+        self._head_address: str | None = None
+        self._image_shown = False       # drives _sync_head: see the docstring there
 
         self.scale = T.tk_scale(1320, 840, self._tk_scaling())
         self._fonts: dict[str, tkfont.Font] = {}
@@ -324,26 +340,22 @@ class Dashboard:
         style.configure("TFrame", background=T.WINDOW_BG)
         style.configure("Card.TFrame", background=T.PANEL_BG)
         style.configure("Well.TFrame", background=T.WINDOW_BG)
-        style.configure("Chip.TFrame", background=T.PANEL_BG_ALT)
         style.configure("Bar.TFrame", background=T.WINDOW_BG)
 
         # ----- type hierarchy
         style.configure("TLabel", background=T.WINDOW_BG, foreground=T.TEXT, font=self.font("body"))
         style.configure("Display.TLabel", font=self.font("display"), foreground=T.TEXT)
-        style.configure("H1.TLabel", background=T.PANEL_BG, font=self.font("h1"), foreground=T.TEXT)
         style.configure("H2.TLabel", background=T.PANEL_BG, font=self.font("h2"), foreground=T.TEXT)
         style.configure("Sub.TLabel", font=self.font("small"), foreground=T.TEXT_MUTED)
-        # text_disabled is genuinely unreadable at 8 pt on this background, so the two hint lines
-        # (keyboard reminder, 3D-column legend) sit between muted and disabled instead. 0.35 is the
-        # darkest blend that still clears WCAG 4.5:1 on both panel_bg (5.02) and window_bg (5.25).
-        hint = T.mix("text_muted", "panel_bg", 0.35)
-        style.configure("Hint.TLabel", font=self.font("tiny"), foreground=hint)
         style.configure("Caption.TLabel", background=T.PANEL_BG, font=self.font("small"),
                         foreground=T.TEXT_MUTED)
         style.configure("CardSub.TLabel", background=T.PANEL_BG, font=self.font("small"),
                         foreground=T.TEXT_MUTED)
+        # text_disabled is genuinely unreadable at 8 pt on this background, so the hint lines (the list
+        # legends, the scan id beside the address) sit between muted and disabled instead. 0.35 is the
+        # darkest blend that still clears WCAG 4.5:1 on both panel_bg (5.02) and window_bg (5.25).
         style.configure("CardHint.TLabel", background=T.PANEL_BG, font=self.font("tiny"),
-                        foreground=hint)
+                        foreground=T.mix("text_muted", "panel_bg", 0.35))
         style.configure("Warn.TLabel", background=T.PANEL_BG, font=self.font("smallsemi"),
                         foreground=T.WARNING)
         style.configure("Well.TLabel", background=T.WINDOW_BG, font=self.font("body"),
@@ -351,11 +363,18 @@ class Dashboard:
         style.configure("Status.TLabel", background=T.PANEL_BG, font=self.font("small"),
                         foreground=T.TEXT_MUTED)
         # chip caption + value (the value colour is set per chip from STAT_FIELDS)
-        style.configure("ChipCap.TLabel", background=T.PANEL_BG_ALT, font=self.font("tiny"),
+        # The stat strip used to be seven filled chips -- seven little boxes with their own background
+        # under an image that already has a frame, which is exactly the "litt mye på en gang" feeling.
+        # Same numbers, same colours, no boxes: the caption is small and muted above a bright value,
+        # and the grouping comes from the gap between pairs instead of from a border.
+        style.configure("ChipCap.TLabel", background=T.PANEL_BG, font=self.font("tiny"),
                         foreground=T.TEXT_MUTED)
         for _key, _caption, role in STAT_FIELDS:
-            style.configure(f"ChipVal{role}.TLabel", background=T.PANEL_BG_ALT,
+            style.configure(f"ChipVal{role}.TLabel", background=T.PANEL_BG,
                             font=self.font("bodysemi"), foreground=T.HEX[role])
+        for _word, role in STATUS_LEGEND:
+            style.configure(f"Dot{role}.TLabel", background=T.PANEL_BG, font=self.font("small"),
+                            foreground=T.HEX[role])
 
         # ----- buttons. clam draws a bevel from lightcolor/darkcolor; flattening those and using
         # bordercolor for a 1 px ring is what stops the buttons looking like Windows 95.
@@ -375,28 +394,10 @@ class Dashboard:
                       darkcolor=[("pressed", active), ("active", hover)],
                       relief=[("pressed", "flat"), ("!pressed", "flat")])
 
+        # Still the base style, so any ttk.Button created without an explicit style is dark rather
+        # than clam's default grey; the bar's own buttons are the rounded tiers below.
         button_style("TButton", T.PANEL_BG_ALT, T.TEXT, T.PANEL_EDGE, T.HOVER_BG, T.ACTIVE_BG)
-        button_style("Accent.TButton", T.ACCENT, T.TEXT_ON_ACCENT, T.ACCENT,
-                     T.ACCENT_HOVER, T.ACCENT_HOVER, font_key="bodysemi")
-        # secondary-but-notable: reads as a button, but the accent lettering keeps "Generer bilder"
-        # the only filled primary on the bar
-        button_style("Ghost.TButton", T.PANEL_BG, T.ACCENT_HOVER, T.HEX["accent_muted"],
-                     T.PANEL_BG_ALT, T.PANEL_BG_ALT, font_key="bodysemi")
-
-        # ----- the view selector: radio buttons drawn as filter chips (Toolbutton layout)
-        style.configure("Seg.Toolbutton", background=T.PANEL_BG, foreground=T.TEXT_MUTED,
-                        bordercolor=T.DIVIDER, lightcolor=T.PANEL_BG, darkcolor=T.PANEL_BG,
-                        # a hair tighter than a real button: the four view chips plus the bin-type
-                        # group then still fit on one line at 1000 px wide
-                        relief="flat", borderwidth=1, padding=(s.pad_s + 1, s.pad_s),
-                        font=self.font("body"), anchor="center", focuscolor=T.FOCUS_RING)
-        style.map("Seg.Toolbutton",
-                  background=[("selected", T.ACCENT), ("active", T.HOVER_BG)],
-                  foreground=[("selected", T.TEXT_ON_ACCENT), ("active", T.TEXT)],
-                  bordercolor=[("selected", T.ACCENT), ("active", T.PANEL_EDGE)],
-                  lightcolor=[("selected", T.ACCENT), ("active", T.HOVER_BG)],
-                  darkcolor=[("selected", T.ACCENT), ("active", T.HOVER_BG)],
-                  relief=[("selected", "flat"), ("!selected", "flat")])
+        self._build_round_styles()
 
         # ----- scan list
         # lightcolor/darkcolor must be neutralised as well: clam draws the tree's field border with
@@ -472,6 +473,76 @@ class Dashboard:
                         bordercolor=T.PANEL_BG, lightcolor=T.ACCENT, darkcolor=T.ACCENT,
                         borderwidth=0, thickness=s.px(4))
         style.configure("TSeparator", background=T.DIVIDER)
+
+    # ---------- rounded buttons ----------
+
+    def _build_round_styles(self) -> None:
+        """Rounded button styles, in three tiers.
+
+        Eight equally-loud buttons on one bar is the "litt mye på en gang" problem in miniature: every
+        action shouted at the same volume, so nothing pointed at what to do next. The bar now has
+        exactly ONE filled button (generate, the action the whole screen exists to trigger), an
+        outlined tier for the things used constantly while working through the list, and a quiet tier
+        for the rare ones -- readable, focusable, keyboard-reachable, just not competing.
+        """
+        s = self.scale
+        style = self.ttk_style
+        if self._rounded is None or self._rounded_style is not style:
+            self._rounded = RoundedStyles(style)
+            self._rounded_style = style
+        radius = max(6, s.px(7))
+
+        focus = T.FOCUS_RING
+        primary = Tier(fill=T.ACCENT, edge=T.ACCENT, states=(
+            ("disabled", T.ACCENT_MUTED, T.ACCENT_MUTED),
+            ("pressed", T.ACCENT_HOVER, T.ACCENT_HOVER),
+            ("active", T.ACCENT_HOVER, T.ACCENT_HOVER),
+            ("focus", T.ACCENT, focus),
+        ))
+        secondary = Tier(fill=T.PANEL_BG_ALT, edge=T.PANEL_EDGE, states=(
+            ("disabled", T.PANEL_BG, T.DIVIDER),
+            ("pressed", T.ACTIVE_BG, T.mix("panel_edge", "text", 0.3)),
+            ("active", T.HOVER_BG, T.mix("panel_edge", "text", 0.3)),
+            ("focus", T.PANEL_BG_ALT, focus),
+        ))
+        # the quiet tier is invisible at rest -- the label alone -- and only grows a surface under the
+        # pointer, which is what keeps four rare actions from adding four more boxes to the screen
+        quiet = Tier(fill=T.WINDOW_BG, edge=T.WINDOW_BG, states=(
+            ("disabled", T.WINDOW_BG, T.WINDOW_BG),
+            ("pressed", T.HOVER_BG, T.PANEL_EDGE),
+            ("active", T.PANEL_BG_ALT, T.PANEL_EDGE),
+            ("focus", T.WINDOW_BG, focus),
+        ))
+        pad = (s.pad_m, s.pad_s + 2)
+        for name, tier, fg, fg_hover, font_key in (
+            ("Primary.TButton", primary, T.TEXT_ON_ACCENT, T.TEXT_ON_ACCENT, "bodysemi"),
+            ("Secondary.TButton", secondary, T.TEXT, T.TEXT, "body"),
+            ("Quiet.TButton", quiet, T.TEXT_MUTED, T.TEXT, "body"),
+        ):
+            self._rounded.button_style(name, tier, radius=radius, behind=T.WINDOW_BG,
+                                       foreground=fg, foreground_hover=fg_hover,
+                                       foreground_disabled=T.TEXT_DISABLED,
+                                       font=self.font(font_key), padding=pad)
+
+        # ----- the view selector: radio buttons drawn as filter chips (Toolbutton layout). Rounded
+        # like the buttons because they read as pressable; square chips beside round buttons looked
+        # like two unrelated widget sets. "selected" comes before "active" so the chosen chip keeps
+        # its accent fill while the pointer is over it.
+        chip = Tier(fill=T.WINDOW_BG, edge=T.DIVIDER, states=(
+            ("disabled", T.WINDOW_BG, T.DIVIDER),
+            ("selected", T.ACCENT, T.ACCENT),
+            ("pressed", T.HOVER_BG, T.PANEL_EDGE),
+            ("active", T.PANEL_BG_ALT, T.PANEL_EDGE),
+            ("focus", T.WINDOW_BG, focus),
+        ))
+        self._rounded.button_style(
+            "Seg.Toolbutton", chip, radius=radius, behind=T.WINDOW_BG,
+            foreground=T.TEXT_MUTED, foreground_hover=T.TEXT,
+            foreground_disabled=T.TEXT_DISABLED, foreground_selected=T.TEXT_ON_ACCENT,
+            font=self.font("body"),
+            # a hair tighter than a real button: the four view chips plus the bin-type group then
+            # still fit on one line at 1000 px wide
+            padding=(s.pad_s + 3, s.pad_s), element_prefix="Toolbutton")
 
     def _restyle(self) -> None:
         """Re-apply everything that depends on the current TkScale (after a resize / DPI change)."""
@@ -551,7 +622,9 @@ class Dashboard:
         s = self.scale
         # 216 px fits "Frydenlundgata 4B, 0169 Oslo" — the longest shape a real address takes here.
         self.tree.column("#0", width=s.px(216), minwidth=s.px(120), stretch=True)
-        self.tree.column("status", width=s.px(82), minwidth=s.px(64), anchor="center", stretch=False)
+        # 82 px was sized for the words "✓ annotert"; a dot only needs room for the heading, and the
+        # 24 px it gives back go to the addresses, which are what people actually read.
+        self.tree.column("status", width=s.px(58), minwidth=s.px(48), anchor="center", stretch=False)
         self.tree.column("bins", width=s.px(54), minwidth=s.px(44), anchor="center", stretch=False)
         self.tree.column("ply", width=s.px(32), minwidth=s.px(28), anchor="center", stretch=False)
 
@@ -574,8 +647,9 @@ class Dashboard:
         ttk.Label(title, text="Søppelrom 3D", style="Display.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(title, text="velg skann · se resultat · åpne i 3D",
                   style="Sub.TLabel").grid(row=1, column=0, sticky="w")
-        ttk.Label(header, text="←/→ blar   ·   G genererer   ·   O åpner 3D   ·   A annoterer",
-                  style="Hint.TLabel", anchor="e").grid(row=0, column=1, rowspan=2, sticky="e")
+        # The top-right shortcut strip used to repeat "←/→ blar · G genererer · O åpner 3D · A
+        # annoterer" -- every one of those letters is already printed on the button it belongs to, so
+        # it was the same information twice, once far away from the thing it described.
 
         # ---------------- body: list | viewer
         body = ttk.Frame(root, style="TFrame")
@@ -628,11 +702,21 @@ class Dashboard:
         scroll.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=scroll.set)
 
+        # Status legend: one Label per dot, because a ttk.Label has a single foreground and the whole
+        # point is that the three dots differ in colour. Laid out with pack in a flow so a narrow
+        # sidebar clips the trailing words rather than widening the column.
+        status_legend = ttk.Frame(side, style="Card.TFrame")
+        self._grid(status_legend, row=3, column=0, sticky="w", pady="pad_s,0")
+        for index, (word, role) in enumerate(STATUS_LEGEND):
+            ttk.Label(status_legend, text=STATUS_DOT, style=f"Dot{role}.TLabel").pack(
+                side="left", padx=(0 if index == 0 else s.pad_s, 2))
+            ttk.Label(status_legend, text=word, style="CardHint.TLabel").pack(side="left")
+
         # wraplength keeps the legend from widening the whole sidebar: a long single line would
         # become the sidebar's requested width and eat the preview's space.
         self.legend_label = ttk.Label(side, text=PLY_LEGEND, style="CardHint.TLabel",
                                       justify="left", wraplength=max(s.sidebar_min - 2 * s.pad_m, 120))
-        self._grid(self.legend_label, row=3, column=0, sticky="w", pady="pad_s,0")
+        self._grid(self.legend_label, row=4, column=0, sticky="w", pady="pad_xs,0")
 
         # ---------------- viewer column
         right = ttk.Frame(body, style="TFrame")
@@ -670,13 +754,17 @@ class Dashboard:
 
         head = ttk.Frame(preview, style="Card.TFrame")
         self._grid(head, row=0, column=0, sticky="ew", pady="0,pad_s")
-        head.columnconfigure(0, weight=1)
-        self.title_label = ttk.Label(head, text="Velg et skann", style="H1.TLabel", anchor="w")
-        self.title_label.grid(row=0, column=0, sticky="ew")
-        self.subtitle_label = ttk.Label(head, text="", style="CardSub.TLabel", anchor="w")
-        self.subtitle_label.grid(row=1, column=0, sticky="ew")
+        head.columnconfigure(1, weight=1)      # the scan id absorbs the slack, warnings stay right
+        # One line, not two. The address was printed here AND inside the generated image's own title
+        # block, and the second row named the selected view -- which the highlighted chip above
+        # already says. What is left is the address, plus the scan id in small type because that is
+        # the only place it appears and it is what the file names are keyed on.
+        self.title_label = ttk.Label(head, text="Velg et skann", style="H2.TLabel", anchor="w")
+        self.title_label.grid(row=0, column=0, sticky="w")
+        self.subtitle_label = ttk.Label(head, text="", style="CardHint.TLabel", anchor="w")
+        self.subtitle_label.grid(row=0, column=1, sticky="w", padx=(s.pad_s, 0))
         self.warn_label = ttk.Label(head, text="", style="Warn.TLabel", anchor="e", justify="right")
-        self.warn_label.grid(row=0, column=1, rowspan=2, sticky="e")
+        self.warn_label.grid(row=0, column=2, sticky="e")
 
         # The image well is window-coloured on purpose: the preview PNGs are rendered on exactly
         # this background (style.BACKDROP), so the picture melts into the well with no seam.
@@ -698,7 +786,9 @@ class Dashboard:
         self._bars.append(self.stats_bar)
         self._grid(self.stats_bar, row=2, column=0, sticky="ew", pady="pad_s,0")
         for key, caption, role in STAT_FIELDS:
-            chip = ttk.Frame(self.stats_bar, style="Chip.TFrame", padding=(s.pad_s, s.pad_xs + 2))
+            # Card-coloured, not chip-coloured, and padded on the right instead of boxed -- see the
+            # ChipCap comment in _build_style for why the boxes went.
+            chip = ttk.Frame(self.stats_bar, style="Card.TFrame", padding=(0, 0, s.pad_m, 0))
             ttk.Label(chip, text=caption, style="ChipCap.TLabel").grid(row=0, column=0, sticky="w")
             value = ttk.Label(chip, text="—", style=f"ChipVal{role}.TLabel")
             value.grid(row=1, column=0, sticky="w")
@@ -713,22 +803,39 @@ class Dashboard:
         self._bars.append(actions)
         self._grid(actions, row=2, column=0, sticky="ew", padx="pad_l", pady="pad_m,pad_s")
 
-        def button(text: str, command, style_name: str = "TButton") -> ttk.Button:
-            return actions.add(ttk.Button(actions, text=text, command=command, style=style_name,
-                                          takefocus=True))
+        def button(text: str, command, style_name: str = "Secondary.TButton",
+                   hint: str = "") -> ttk.Button:
+            widget = ttk.Button(actions, text=text, command=command, style=style_name,
+                                takefocus=True)
+            if hint:
+                # The labels used to carry their own explanation ("Forbered: bygg 3D + finn kasser"),
+                # which is most of why the bar felt crowded. The words are not lost -- they moved to
+                # the status bar, which was sitting empty, and appear on hover.
+                widget.bind("<Enter>", lambda _e, t=hint: self._hover_status(t))
+                widget.bind("<Leave>", lambda _e: self._restore_status())
+            return actions.add(widget)
 
-        button("◀ Forrige (←)", lambda: self._step(-1))
-        button("Neste (→) ▶", lambda: self._step(1))
+        # Tiers, not eight shouts: ONE filled primary, outlined for what gets used on every scan,
+        # quiet for the rare ones. Nothing is hidden -- "jeg liker at det viser mye informasjon og
+        # muligheter" -- the rare actions are just no longer as loud as the main one.
+        button("◀ Forrige (←)", lambda: self._step(-1), hint="Forrige skann i listen")
+        button("Neste (→) ▶", lambda: self._step(1), hint="Neste skann i listen")
         actions.separator()
-        button("Generer bilder (G)", lambda: self._generate([self._selected()]), "Accent.TButton")
-        button("Generer alle (⇧G)", self._generate_all)
+        button("Generer bilder (G)", lambda: self._generate([self._selected()]), "Primary.TButton",
+               hint="Beregn plassering på nytt og tegn alle fire bildene for dette skannet")
+        button("Generer alle (⇧G)", self._generate_all, "Quiet.TButton",
+               hint="Samme for hvert forberedt skann — tar lang tid")
         actions.separator()
-        button("Åpne i 3D — plassering (O)", self._open_3d)
-        button("3D-rekonstruksjon (R)", self._open_reconstruction)
-        button("Annotér (A)", self._annotate)
-        button("Forbered: bygg 3D + finn kasser (F)", self._prepare)
-        actions.separator()
-        button("Statistikk (S)", self._open_stats, "Ghost.TButton")
+        button("Åpne i 3D (O)", self._open_3d,
+               hint="Se plasseringen i 3D med gangsti og søppelbil")
+        button("Annotér (A)", self._annotate,
+               hint="Merk kasser og inngang for hånd — dette er treningsdataene")
+        button("Forbered (F)", self._prepare, "Quiet.TButton",
+               hint="Bygg punktsky og mesh, og finn kasser automatisk")
+        button("Rekonstruksjon (R)", self._open_reconstruction, "Quiet.TButton",
+               hint="Se den rå 3D-rekonstruksjonen uten forslag")
+        button("Statistikk (S)", self._open_stats, "Quiet.TButton",
+               hint="Samlerapport over alle skann i nettleseren")
 
         # ---------------- status bar
         bar_shell = tk.Frame(root, bg=T.DIVIDER, bd=0, highlightthickness=0)
@@ -776,15 +883,19 @@ class Dashboard:
     # ---------- scan list ----------
 
     def _address(self, stem: str) -> str | None:
-        """Cached address for a scan (from its stats.json); None if the scan has no rendered stats."""
+        """Address for a scan: from its rendered stats.json when it has one, otherwise straight out of
+        the scan archive (see pipeline.address_of), so scans that have never been generated still show
+        an address instead of their raw id."""
         if stem not in self._addr_cache:
             path = pipeline.preview_dir(stem) / "stats.json"
             address = None
             if path.exists():
                 try:
                     address = json.loads(path.read_text(encoding="utf-8")).get("address")
-                except Exception:  # noqa: BLE001 - a bad stats file just falls back to the scan id
+                except Exception:  # noqa: BLE001 - a bad stats file just falls back to the archive
                     address = None
+            if not address:
+                address = pipeline.address_of(stem)
             self._addr_cache[stem] = address
         return self._addr_cache[stem]
 
@@ -798,17 +909,18 @@ class Dashboard:
             label = address or stem
             if query and query not in label.lower() and query not in stem.lower():
                 continue
+            # the dot is the same glyph for all three; only the row tag (and so its colour) differs
             if pipeline.is_annotated(stem):
-                status, tag = "✓ annotert", "annotated"
+                tag = "annotated"
                 annotated_count += 1
             elif pipeline.is_prepared(stem):
-                status, tag = "klar", "prepared"
+                tag = "prepared"
             else:
-                status, tag = "rå", "raw"
+                tag = "raw"
             bins = pipeline.existing_bin_count(stem) if pipeline.is_prepared(stem) else ""
             ply, self._ply_reason[stem] = ply_align.backdrop_status(stem)
             parity = "odd" if shown % 2 else "even"
-            self.tree.insert("", "end", iid=stem, text=label, values=(status, bins, ply),
+            self.tree.insert("", "end", iid=stem, text=label, values=(STATUS_DOT, bins, ply),
                              tags=(f"{tag}_{parity}",))
             shown += 1
         if query:
@@ -823,6 +935,21 @@ class Dashboard:
     def _selected(self) -> str | None:
         sel = self.tree.selection()
         return sel[0] if sel else None
+
+    # ---------- status line ----------
+
+    def _hover_status(self, text: str) -> None:
+        # A running job owns the status line: overwriting "Genererer 12 av 322 ..." because the
+        # pointer crossed a button would throw away the only progress the user has.
+        if not self._busy:
+            self.status.set(text)
+
+    def _restore_status(self) -> None:
+        """Back to the line the current selection would show by itself."""
+        if self._busy:
+            return
+        stem = self._selected()
+        self.status.set((self._ply_reason.get(stem) if stem else None) or "Klar.")
 
     def _editing(self) -> bool:
         return isinstance(self.root.focus_get(), tk.Entry)
@@ -867,9 +994,8 @@ class Dashboard:
             self.status.set(self._ply_reason[stem])
 
     def _on_view_change(self) -> None:
-        stem = self._selected()
-        if stem:                     # the caption under the address names the view being shown
-            self.subtitle_label.configure(text=f"{stem}   ·   {self.view.get()}")
+        # The view name is not repeated next to the address any more: the selected chip is filled with
+        # the accent colour, which is the same information in the place the choice was made.
         self._show_image()
 
     def _show_image(self) -> None:
@@ -883,6 +1009,8 @@ class Dashboard:
             self._rendered = None
             self._photo = None
             self.image_label.configure(image="", text="Ingen bilder ennå — trykk «Generer bilder».")
+            self._image_shown = False
+            self._sync_head()      # nothing on screen carries the address -> the head takes it back
             return
         if path != self._pil_path:
             # Read from disk only when the file actually changes; every resize re-samples this copy.
@@ -890,6 +1018,8 @@ class Dashboard:
             self._pil.load()
             self._pil_path = path
             self._rendered = None
+        self._image_shown = True
+        self._sync_head()
         self._render_photo()
 
     def _render_photo(self) -> None:
@@ -913,19 +1043,42 @@ class Dashboard:
         self.image_label.configure(image=self._photo, text="")
         self._rendered = signature
 
+    def _sync_head(self) -> None:
+        """Who gets to print the address: the head, or the picture.
+
+        Every generated sheet draws the address in its own title block, because the PNG is the thing
+        that gets shown to someone else and has to stand alone. So while a picture is on screen the
+        head steps down to one small muted line -- the address was appearing twice, 40 px apart. With
+        no picture there is nothing to carry it, and the head becomes the headline again.
+        """
+        stem = self._selected()
+        address = self._head_address
+        if self._image_shown and address:
+            # The sheet prints the address AND the scan id itself, so the head has nothing left to add
+            # -- both labels go, the warning stays, and the row collapses to give the picture the space.
+            self.title_label.grid_remove()
+            self.subtitle_label.grid_remove()
+        else:
+            self.subtitle_label.grid()
+            self.title_label.grid()
+            self.title_label.configure(text=address or stem or "Velg et skann")
+            # with the address as the headline, repeating the scan id beside it is only useful when
+            # the two differ
+            self.subtitle_label.configure(text=stem if (address and stem) else "")
+
     def _load_stats(self) -> None:
         stem = self._selected()
         stats_path = pipeline.preview_dir(stem) / "stats.json" if stem else None
         if not stats_path or not stats_path.exists():
-            self.title_label.configure(text=stem or "Velg et skann")
-            self.subtitle_label.configure(text=stem or "")
+            self._head_address = self._address(stem) if stem else None
+            self._sync_head()
             self.warn_label.configure(text="")
             self._set_stats_visible(False)
             return
         s = json.loads(stats_path.read_text(encoding="utf-8"))
         inne = "innendørs" if s.get("indoor") else "utendørs/åpent"
-        self.title_label.configure(text=s.get("address") or stem)
-        self.subtitle_label.configure(text=f"{stem}   ·   {self.view.get()}")
+        self._head_address = s.get("address") or self._address(stem)
+        self._sync_head()
         self.warn_label.configure(
             text="⚠ INNESPERRET (dør lukket i scan) — hoppet over" if s.get("closed_room") else "")
         values = {

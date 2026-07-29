@@ -24,14 +24,19 @@ import numpy as np
 import open3d as o3d
 
 from . import pipeline, place3d
+from . import uitheme as T
 from .annotations import BIN_TYPES
 from .paths import PREVIEW_ROOT
 
 FLOOR_COLOR = (0.30, 0.30, 0.32)   # asphalt grey (fallback + snapshot; interactive uses a texture)
 WALL_COLOR = (0.62, 0.32, 0.26)    # brick red (fallback + snapshot; interactive uses a texture)
-EXIST_COLOR = (0.85, 0.12, 0.12)
-PROPOSED_COLOR = (0.18, 0.80, 0.24)
-ENTRANCE_COLOR = (1.00, 0.10, 1.00)
+# These three carry MEANING, so they come from uitheme (i.e. from style.py, the palette the preview
+# PNGs are drawn with) instead of being three more private near-misses. This viewer subclasses
+# place3d.PlacementViewer and shares its panel, so an off-palette red here made one half of the
+# window disagree with the other about what "eksisterende kasse" looks like.
+EXIST_COLOR = T.rgb_of("existing_bin")      # red     = kassen står her allerede
+PROPOSED_COLOR = T.rgb_of("new_bin")        # green   = foreslått ny plass
+ENTRANCE_COLOR = T.rgb_of("entrance")       # magenta = inngang
 BIN_EDGE = (0.0, 0.0, 0.0)
 WALL_ALPHA = 0.55
 PROPOSED_ALPHA = 0.85
@@ -402,9 +407,13 @@ class ReconstructionViewer(place3d.PlacementViewer):
         eye = center + np.array([span[0] * 0.35 + 2.0, span[1] * 1.8 + 3.0, span[2] * 0.9 + 3.0])
         self.scene.look_at(center, eye, [0.0, 1.0, 0.0])
 
-        self.stats_label.text = (
-            f"{len(scene.result.candidates)} nye plasser · {len(scene.existing)} eksisterende · "
-            f"ledig gulv {scene.fs.free_area_m2:.1f} m² · formtro (gulv + ekte vegger, uten tak)"
+        # Go through _status(), not stats_label.text: it hard-wraps to the panel width (an Open3D
+        # label never wraps, it just runs off the edge) and it resets the colour, so a red "Feil: …"
+        # from a previous scan does not stay red on this one.
+        self._status(
+            f"{len(scene.result.candidates)} nye plasser · {len(scene.existing)} eksisterende\n"
+            f"Ledig gulv {scene.fs.free_area_m2:.1f} m²\n"
+            "Formtro: gulv + ekte vegger, uten tak"
         )
         self.window.post_redraw()
 

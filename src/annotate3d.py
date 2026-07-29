@@ -443,7 +443,9 @@ class AnnotationApp:
         """Scene + panel rects for a content rect. Pure, so it can be checked with synthetic
         window sizes without clicking anything."""
         width = max(int(rect.width), 0)
-        panel_width = min(self._panel_width(width), width)
+        # Leave the scene at least 1 px: below ~12 em of window width the 12 em panel floor would
+        # otherwise claim everything and the SceneWidget would be laid out zero-wide.
+        panel_width = min(self._panel_width(width), max(width - 1, 0))
         scene_width = max(width - panel_width, 0)
         scene = gui.Rect(rect.x, rect.y, scene_width, rect.height)
         panel = gui.Rect(rect.x + scene_width, rect.y, panel_width, rect.height)
@@ -791,7 +793,10 @@ class AnnotationApp:
         self._drawn_boxes = len(self.boxes)
 
         for index, box in enumerate(self.boxes):
-            color = SELECTED_COLOR if index == self.selected else STATUS_COLORS.get(box.status, (1, 0, 0))
+            # The fallback is for an unknown status only; take it from the palette too, so even that
+            # case cannot introduce a pure red that no legend explains.
+            color = (SELECTED_COLOR if index == self.selected
+                     else STATUS_COLORS.get(box.status, T.rgb_of("danger")))
             corners = box.corners()
 
             lineset = o3d.geometry.LineSet(
