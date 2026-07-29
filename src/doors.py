@@ -56,7 +56,13 @@ CANDIDATE_SPACING_M = 0.30   # sample a candidate roughly every this far along t
 WINDOW_M = 0.45              # local neighbourhood used to describe a candidate
 KEEP_PROB = 0.40             # find_doors keeps candidates scoring at least this (favours recall)
 MERGE_RADIUS_M = 0.8         # kept candidates closer than this are one door
-MAX_DOORS = 2                # a trash room realistically has one or two entrances, not nine
+# One GUESS only. A room can genuinely have two entrances, but the model is right about the top one
+# in 42% of scenes (within 3 m, held out) — so a second guess is more often a wrong door than a real
+# one, and a wrong door drags the push-path through the wrong wall and produces placements that look
+# plausible but are not. Measured cost of dropping to 1 on eight auto-detected scans: +1 placement
+# candidate (+2.3%), i.e. none. This caps AUTO-DETECTION only: clicked entrances bypass find_doors
+# entirely (pipeline.compute_scene), so you can still mark as many real doors as a room has.
+MAX_DOORS = 1
 
 # "on the floor, and not floating" — an entrance is only useful if a bin can actually be rolled
 # from it onto the room floor, so a candidate must have real, observed floor right next to it.
