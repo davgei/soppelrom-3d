@@ -22,6 +22,7 @@ from scipy.ndimage import (
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import dijkstra
 
+from .annotations import BIN_TYPES
 from .freespace import FreeSpaceResult
 
 
@@ -315,6 +316,7 @@ def pack_placements(
     size_weight: float = 0.9,
     group_radius: float = 5.0,
     relax_group: bool = True,
+    bins_block: bool = True,
 ) -> tuple[list[Candidate], np.ndarray, np.ndarray]:
     """Fill free floor with a MIX of bin types (bin_specs = (name, length, width), largest first).
 
@@ -352,19 +354,38 @@ def pack_placements(
         return float(wall_dist_map[r, c])
 
     def _reroute(bins: list) -> tuple:
-        """Recompute the push-path treating every bin footprint as passable path (you route through
-        the spot where a bin stands), so no bin can block another and each bin extends the path."""
+        """Recompute the push-path. Bins BLOCK it; they are not passable floor.
+
+        This used to add every bin's footprint back into the passable mask -- "you route through the
+        spot where a bin stands" -- which is true of the bin you are moving and false of every other
+        bin in the room. The result was that a new bin could be proposed BEHIND a row of existing
+        bins and the path to it drawn straight through them, so collecting it would mean rolling four
+        other containers out of the way first. That is the one thing the push-path exists to prevent.
+
+        The bin's own footprint is not needed for its route either: route_corridor snaps each target to
+        the nearest cell it can actually reach, so a bin standing on non-passable floor is still routed
+        to its edge. The footprints are added to the DRAWN corridor afterwards, which is cosmetic --
+        the floor a bin stands on is part of the path in the picture, not in the search.
+        """
         occ_solid = _boxes_mask(bins, origin, cell, shape, grow=0.10)   # for overlap tests
-        bin_fp = _boxes_mask(bins, origin, cell, shape, grow=0.02)      # counted as path
-        passable = (free_acc & ~occ_solid) | bin_fp
+        bin_fp = _boxes_mask(bins, origin, cell, shape, grow=0.02)
+        # Blocked by the bins' ACTUAL footprint rather than occ_solid's 10 cm skirt, since the skirt is
+        # there to stop two bins touching, not to describe what a bin can be rolled past. TESTED: it
+        # makes almost no difference (157 proposals vs 156 over 60 rooms) -- the cost of not routing
+        # through bins is the corridor having to go around them, not the width of the ring around each.
+        passable = free_acc & ~bin_fp if bins_block else (free_acc & ~occ_solid) | bin_fp
         route, corridor, region = route_corridor(fs, passable, entrances,
                                                   [(b[0], b[1]) for b in bins], passage_width)
-        corridor = corridor | bin_fp   # a bin's own floor is shown as part of the push-path
+        # Two corridors, and keeping them apart is the whole point. `corridor` is what the SEARCH
+        # found -- floor a bin can really be rolled along. `drawn` adds the bins' own floor for the
+        # picture. Building `placeable` from `drawn` would let a candidate qualify by touching the
+        # footprint of the bin blocking it, which is the same bug one level down.
+        drawn = corridor | bin_fp
         apron = binary_dilation(_boxes_mask(bins, origin, cell, shape, grow=0.0),
                                 iterations=max(1, int(0.45 / cell)))  # reclaimable ring around bins
         protected = corridor & ~apron
         placeable = region | binary_dilation(corridor, iterations=1)
-        return occ_solid, corridor, route, protected, placeable
+        return occ_solid, drawn, route, protected, placeable
 
     all_bins = list(existing_bins)
     occ, corridor, route, protected, placeable = _reroute(all_bins)
@@ -406,6 +427,40 @@ def pack_placements(
     # Sorgenfrigata 36A had 37 m2 of reachable, container-sized floor and zero proposals. When the
     # limit leaves nothing at all, the best-ranked spot is taken anyway and the group re-anchors to
     # THAT bin, so the new bins still end up together even when they cannot join the old one.
+    # Two big containers may share a little floor. The `occ` mask grows every bin by 10 cm and `_fits`
+    # then grows the candidate by `spacing` too, so two 4-hjuls containers need ~25 cm of air between
+    # them; where a wall run is 1.60 m the second one does not fit and the packer turns it 90 degrees
+    # instead. Both numbers are safety margins around a size that was itself snapped to a catalogue
+    # value, not measured -- so a small overlap between two containers is slack in our own model, not
+    # two bins occupying the same floor. Only container-to-container: a dunk squeezed under a container
+    # would be a real collision, and an "annet" box has no known size to be generous about.
+    OVERLAP_FRACTION = 0.12          # of the candidate's own footprint
+
+    def _is_container(length: float, width: float, tol: float = 0.12) -> bool:
+        spec_l, _h, spec_w = BIN_TYPES["4-hjuls container"]
+        long_side, short_side = max(length, width), min(length, width)
+        return (abs(long_side - max(spec_l, spec_w)) <= tol
+                and abs(short_side - min(spec_l, spec_w)) <= tol)
+
+    def _overlap_allowed(spot: Candidate, cand_mask: np.ndarray) -> bool:
+        """True when everything the candidate overlaps is another container and the shared area is small."""
+        if not _is_container(spot.length_m, spot.width_m):
+            return False
+        area = float(cand_mask.sum())
+        if area <= 0:
+            return False
+        budget = OVERLAP_FRACTION * area
+        shared = 0.0
+        for bx, bz, bl, bw, byaw in all_bins:
+            other = _box_mask(((bx, bz), (bl, bw), byaw), origin, cell, shape, grow=0.0)
+            common = float((cand_mask & other).sum())
+            if common <= 0:
+                continue
+            if not _is_container(bl, bw):
+                return False          # overlapping something that is not a container
+            shared += common
+        return 0.0 < shared <= budget
+
     anchors = list(existing_centers or entrances)
     relaxed = False
 
@@ -419,7 +474,8 @@ def pack_placements(
             return False   # too far from the room's bin group / entrance
         cand_mask = _box_mask(spot.rect, origin, cell, shape, grow=spacing)
         if (cand_mask & occ).any():
-            return False   # overlaps an existing/placed bin
+            if not _overlap_allowed(spot, cand_mask):
+                return False   # overlaps an existing/placed bin
         if (cand_mask & protected).any():
             return False   # sits on the sacred push-path (outside the reclaimable apron)
         if not (cand_mask & placeable).any():
@@ -431,8 +487,14 @@ def pack_placements(
         centers = existing_centers + [c.center_xz for c in placed]
         spots: list[Candidate] = []
         for name, length, width in bin_specs:
-            found = _wall_candidates(free_acc & ~occ, walls, length, width, origin, cell, spacing,
-                                     pool, wall_angle_deg=wall_angle_deg)
+            # Both orientations against the wall. Generating only one is what made every container look
+            # turned 90 degrees (see _wall_candidates); generating both lets _rank prefer the one the
+            # annotations favour and _fits fall back to the other where only it fits.
+            found = []
+            for long_along in (True, False):
+                found.extend(_wall_candidates(free_acc & ~occ, walls, length, width, origin, cell,
+                                              spacing, pool, wall_angle_deg=wall_angle_deg,
+                                              long_along_wall=long_along))
             if not found:
                 found = _open_floor_candidates(free_acc & ~occ, wall_angle_deg, length, width, margin,
                                                origin, cell, all_bins, spacing, pool)
@@ -507,16 +569,29 @@ def _wall_candidates(
     max_candidates: int,
     wall_gap: float = 0.03,
     wall_angle_deg: float | None = None,
+    long_along_wall: bool = False,
 ) -> list[Candidate]:
-    """Place bins hugging the walls. A bin parks with its SHORT side against the wall and its long
-    side extending into the room (so a row of bins packs tightly along the wall), a small gap off
-    the wall. Orientation is snapped to the room axis (wall_angle_deg) so neighbouring bins are
-    parallel. Candidates are generated densely along the wall and a little slack is allowed at
-    ragged edges; the caller ranks and de-conflicts them."""
+    """Place bins hugging the walls, a small gap off it, snapped to the room axis (wall_angle_deg) so
+    neighbouring bins are parallel. Candidates are generated densely along the wall and a little slack
+    is allowed at ragged edges; the caller ranks and de-conflicts them.
+
+    long_along_wall picks which side faces the wall, and it is NOT a matter of taste. Measured over 45
+    annotated rooms, against the nearest detected wall:
+
+        4-hjuls container (n=80):  50% stand with the long side ALONG the wall, 34% short side against
+        2-hjuls dunk      (n=79):  35% along, 46% short side against
+
+    So the old behaviour -- short side against the wall for every type, to pack more bins per metre of
+    wall -- is the minority arrangement for containers, which is why every proposed container looked
+    turned 90 degrees. pack_placements now generates BOTH orientations and lets the ranking choose,
+    because 50 vs 34 is a tendency and not a rule, and a tight corner may only admit one of them.
+    """
     if wall_mask is None or not wall_mask.any():
         return []
-    along = min(length, width)  # SHORT side sits against the wall (bins line up side by side)
-    into = max(length, width)   # LONG side extends into the room
+    if long_along_wall:
+        along, into = max(length, width), min(length, width)
+    else:
+        along, into = min(length, width), max(length, width)
     distance, (row_idx, col_idx) = distance_transform_edt(~wall_mask, return_indices=True)
     distance_m = distance * cell
     rows, cols = free_acc.shape

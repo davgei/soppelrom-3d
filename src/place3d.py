@@ -36,7 +36,7 @@ import open3d.visualization.rendering as rendering
 from scipy.ndimage import binary_closing, binary_dilation, label
 from scipy.sparse.csgraph import dijkstra
 
-from . import backdrop, pipeline, placement
+from . import backdrop, meshcull, pipeline, placement
 from . import uitheme as T
 from .annotations import BIN_TYPES
 
@@ -660,6 +660,9 @@ class PlacementViewer:
         self._n_cands = 0
         self._clutter_m2 = 0.0
         self._cam: np.ndarray | None = None  # smoothed follow-camera state (eye+target)
+        self._culler: meshcull.BackfaceCuller | None = None
+        self._mesh_material: rendering.MaterialRecord | None = None
+        self._last_cull_time = 0.0
         self.window.set_on_tick_event(self._tick)
         self._load()
 
@@ -804,6 +807,14 @@ class PlacementViewer:
                                             lambda _v: self._apply_backdrop(),
                                             "Uten denne kuttes skyen 2 m over gulvet")
         section.add_child(self.ceiling_check)
+        # On by default, and it is what makes this window usable: without it a room scanned from the
+        # inside is drawn as a closed box, so from the outside you see the back of the near wall and
+        # not the room. The annotation tool has had this since it was written; this window never did.
+        self.cull_check = self._checkbox("Se gjennom nærmeste vegg", True,
+                                         lambda _v: self._update_culling(force=True),
+                                         "Skjuler flater som vender bort fra kameraet, "
+                                         "så du ser inn i rommet utenfra")
+        section.add_child(self.cull_check)
         self.backdrop_label = self._label("", "text_muted", "small")
         section.add_child(self.backdrop_label)
 
@@ -1125,6 +1136,7 @@ class PlacementViewer:
     def _render(self, scene) -> None:
         self.scene.scene.clear_geometry()
 
+        self._culler = None
         if scene.mesh is not None:
             mesh = scene.mesh
             if not mesh.has_vertex_normals():
@@ -1132,6 +1144,8 @@ class PlacementViewer:
             material = rendering.MaterialRecord()
             material.shader = "defaultLit"
             self._ours_name = "mesh"
+            self._mesh_material = material
+            self._culler = meshcull.BackfaceCuller(mesh)
             self.scene.scene.add_geometry("mesh", mesh, material)
             bounds = mesh.get_axis_aligned_bounding_box()
         else:
@@ -1245,7 +1259,42 @@ class PlacementViewer:
         if legs:
             self._anim = {"legs": legs, "floor": float(scene.floor_height)}
 
+    def _update_culling(self, force: bool = False) -> bool:
+        """Redraw our mesh with the backfaces dropped, so the room opens up from outside.
+
+        Skipped while the Polycam cloud is the backdrop: our mesh is hidden then, and a point cloud has
+        no facing to cull anyway.
+        """
+        if self._culler is None or self._mesh_material is None:
+            return False
+        if self._backdrop is not None and self._backdrop.available and self.polycam_check.checked:
+            return False
+        if not self.cull_check.checked:
+            # put the whole mesh back exactly once, not on every tick
+            if self._culler._last_eye is None:
+                return False
+            self._culler.reset()
+            self.scene.scene.remove_geometry(self._ours_name)
+            self.scene.scene.add_geometry(self._ours_name, self._culler.mesh, self._mesh_material)
+            self.window.post_redraw()
+            return True
+
+        _, _, eye = self._camera_basis()
+        culled = self._culler.culled_for(eye, force=force)
+        if culled is None:
+            return False
+        self.scene.scene.remove_geometry(self._ours_name)
+        self.scene.scene.add_geometry(self._ours_name, culled, self._mesh_material)
+        self.window.post_redraw()
+        return True
+
     def _tick(self) -> bool:
+        # Culling first, and throttled: it reacts to the CAMERA, which moves on its own during the
+        # collection animation, so it cannot wait for a mouse event the way a static viewer could.
+        redraw = False
+        if time.time() - self._last_cull_time > 0.2:
+            self._last_cull_time = time.time()
+            redraw = self._update_culling()
         if self._anim is None or not self.anim_check.checked:
             cleared = False
             for name in (self._mover_name, self._bin_name, self._trash_name):
@@ -1256,7 +1305,7 @@ class PlacementViewer:
             self.motion_label.text = "" if self._anim is not None else "ingen runde å vise"
             if cleared:
                 self.window.post_redraw()
-            return False
+            return redraw or cleared
 
         now = time.monotonic()
         raw_dt = min(now - self._last_tick, 0.1) if self._last_tick is not None else 0.0

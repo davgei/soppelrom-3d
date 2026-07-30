@@ -50,7 +50,7 @@ import open3d as o3d
 import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
 
-from . import backdrop
+from . import backdrop, meshcull
 from . import uitheme as T
 from .annotations import (
     BIN_TYPES,
@@ -206,9 +206,9 @@ class AnnotationApp:
         # camera framing read, and the Polycam cloud must never feed either.
         self.use_polycam = True
         self._backdrop: backdrop.Backdrop | None = None
-        self._tri_normals: np.ndarray | None = None
-        self._tri_centers: np.ndarray | None = None
-        self._last_cull_eye: np.ndarray | None = None
+        # The see-through-walls cull lives in meshcull, shared with place3d. It used to be inline here
+        # and only here, which is why the placement viewer drew rooms as closed boxes.
+        self._culler: meshcull.BackfaceCuller | None = None
         self._last_cull_time = 0.0
 
         gui.Application.instance.initialize()
@@ -559,10 +559,7 @@ class AnnotationApp:
         material.shader = "defaultLit"
         self._mesh = mesh
         self._mesh_material = material
-        self._tri_normals = np.asarray(mesh.triangle_normals).copy()
-        triangles = np.asarray(mesh.triangles)
-        self._tri_centers = np.asarray(mesh.vertices)[triangles].mean(axis=1)
-        self._last_cull_eye = None
+        self._culler = meshcull.BackfaceCuller(mesh)
         self.scene.scene.add_geometry("room_mesh", mesh, material)
         self.mesh_loaded = True
 
@@ -693,37 +690,25 @@ class AnnotationApp:
         self.window.post_redraw()
 
     def _update_culling(self, force: bool = False) -> bool:
-        """Hide mesh triangles facing away from the camera. Walls are scanned from one side
-        only (normals point into the room), so their backsides disappear when the camera is
-        outside — a dollhouse view that makes annotating inside rooms much easier."""
-        if self._mesh is None or self._tri_normals is None:
+        """Hide mesh triangles facing away from the camera — see meshcull for why and how."""
+        if self._culler is None:
             return False
         if self._showing_polycam():
             # our mesh is hidden anyway; rebuilding it on every camera move would cost for nothing
             return False
         if not self.cull_checkbox.checked:
-            if self._last_cull_eye is not None:
-                self._last_cull_eye = None
-                self._remove_geometry("room_mesh")
-                self.scene.scene.add_geometry("room_mesh", self._mesh, self._mesh_material)
-                self.window.post_redraw()
-                return True
-            return False
+            if self._culler._last_eye is None:
+                return False
+            self._culler.reset()
+            self._remove_geometry("room_mesh")
+            self.scene.scene.add_geometry("room_mesh", self._culler.mesh, self._mesh_material)
+            self.window.post_redraw()
+            return True
 
         _, _, eye = self._camera_basis()
-        if not force and self._last_cull_eye is not None:
-            if float(np.linalg.norm(eye - self._last_cull_eye)) < 0.02:
-                return False
-        self._last_cull_eye = eye
-
-        view_dirs = eye - self._tri_centers
-        visible = np.einsum("ij,ij->i", self._tri_normals, view_dirs) > 0.0
-        culled = o3d.geometry.TriangleMesh(
-            self._mesh.vertices,
-            o3d.utility.Vector3iVector(np.asarray(self._mesh.triangles)[visible]),
-        )
-        culled.vertex_colors = self._mesh.vertex_colors
-        culled.vertex_normals = self._mesh.vertex_normals
+        culled = self._culler.culled_for(eye, force=force)
+        if culled is None:
+            return False
         self._remove_geometry("room_mesh")
         self.scene.scene.add_geometry("room_mesh", culled, self._mesh_material)
         self.window.post_redraw()
