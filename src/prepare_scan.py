@@ -280,6 +280,7 @@ def redetect(
     conf: float = 0.05,
     min_views: int = 2,
     unannotated_first: bool = True,
+    only: list[str] | None = None,
 ) -> None:
     """Regenerate proposals from the CACHED cloud, without redoing reconstruction.
 
@@ -287,8 +288,19 @@ def redetect(
     is by far the slowest step — so after changing the size gate, the wall-axis straightening or the
     verifier, this re-runs only the proposal half: YOLO -> back-projection -> gate -> snap+straighten
     -> verifier -> overlap NMS. Only cache/<scan>/proposals.json is rewritten; your annotations in
-    outputs/annotations/ are never touched."""
+    outputs/annotations/ are never touched.
+
+    `only` limits the run to named scan stems. A full pass is 2-3 hours of YOLO, which is a long time
+    to wait before finding out that a change to the typing rules does the wrong thing — so verify the
+    rule on a handful of scans first, then let it loose.
+    """
     scans = [p for p in sorted(RAW_DIR.glob("*.zip")) if (cache_root / p.stem / "cloud.ply").exists()]
+    if only:
+        wanted = set(only)
+        scans = [p for p in scans if p.stem in wanted]
+        missing = wanted - {p.stem for p in scans}
+        if missing:
+            print(f"[redetect] ikke funnet (mangler cloud.ply?): {sorted(missing)}", flush=True)
     if unannotated_first:  # the scans you are about to annotate get their new boxes first
         scans.sort(key=lambda p: is_annotated(p))
     if not scans:
@@ -397,9 +409,13 @@ def main() -> None:
                         help="detector weights (default: outputs/models/bins_latest.pt if trained, else yolov8s-worldv2)")
     parser.add_argument("--conf", type=float, default=0.05)
     parser.add_argument("--min-views", type=int, default=2)
+    parser.add_argument("--only", nargs="+", default=None,
+                        help="med --redetect: bare disse skann-IDene (for å prøve en endring først)")
     args = parser.parse_args()
 
-    if args.scan:
+    # --scan with --redetect means "redetect just this one", not "rebuild it from scratch"; without
+    # this the flags would silently contradict each other and the slower path would win.
+    if args.scan and not args.redetect:
         prepare(Path(args.scan), weights=args.weights, conf=args.conf,
                 min_views=args.min_views, force=args.force)
         return
@@ -409,7 +425,8 @@ def main() -> None:
         return
 
     if args.redetect:
-        redetect(weights=args.weights, conf=args.conf, min_views=args.min_views)
+        only = args.only or ([Path(args.scan).stem] if args.scan else None)
+        redetect(weights=args.weights, conf=args.conf, min_views=args.min_views, only=only)
         return
 
     if args.watch:

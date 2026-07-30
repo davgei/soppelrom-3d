@@ -314,6 +314,7 @@ def pack_placements(
     near_weight: float = 1.6,
     size_weight: float = 0.9,
     group_radius: float = 5.0,
+    relax_group: bool = True,
 ) -> tuple[list[Candidate], np.ndarray, np.ndarray]:
     """Fill free floor with a MIX of bin types (bin_specs = (name, length, width), largest first).
 
@@ -398,7 +399,15 @@ def pack_placements(
     # Anchors are the EXISTING bins (not the ones we just placed) so a chain of 4 m hops cannot creep
     # across the yard; with no existing bins the entrance is the anchor, since that is where a new
     # collection point belongs.
-    anchors = existing_centers or list(entrances)
+    #
+    # It is a limit with a FALLBACK, not a veto. As a hard veto it emptied 14 of the 46 rooms that
+    # produced no proposal at all: in a 227 m2 yard with one bin against one wall, every square metre
+    # a container could stand on is further than 5 m away by construction, so the room got nothing --
+    # Sorgenfrigata 36A had 37 m2 of reachable, container-sized floor and zero proposals. When the
+    # limit leaves nothing at all, the best-ranked spot is taken anyway and the group re-anchors to
+    # THAT bin, so the new bins still end up together even when they cannot join the old one.
+    anchors = list(existing_centers or entrances)
+    relaxed = False
 
     def _near_group(xz: tuple[float, float]) -> bool:
         if not anchors:
@@ -430,7 +439,16 @@ def pack_placements(
             for s in found:
                 s.bin_type = name
             spots.extend(found)
-        chosen = next((s for s in _rank(spots, centers) if _fits(s)), None)
+        ranked = _rank(spots, centers)
+        chosen = next((s for s in ranked if _fits(s)), None)
+        if chosen is None and relax_group and not placed and not relaxed and anchors:
+            # Nothing at all within group_radius of the existing bins. Take the best spot regardless
+            # and make it the anchor, so the room gets a proposal instead of silence and the bins that
+            # follow still cluster -- around the new one rather than the unreachable old one.
+            relaxed = True
+            held, anchors = anchors, []
+            chosen = next((s for s in ranked if _fits(s)), None)
+            anchors = [chosen.center_xz] if chosen is not None else held
         if chosen is None:
             break  # nothing more fits without blocking a path or overlapping
         placed.append(chosen)
