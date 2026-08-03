@@ -19,3 +19,6 @@ outputs/*
 !outputs/entrances/
 !outputs/web_proposals/
 !models/*.pt
+
+# Sikkerhetskopi av outputs foer annoteringsmappene ble slaatt sammen (03.08.2026).
+outputs_gammel_kopi_*/

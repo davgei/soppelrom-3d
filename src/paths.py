@@ -57,5 +57,14 @@ PLY_DIR = DATA_HOME / "ply"
 MESH_DIR = DATA_HOME / "polycam_mesh"
 
 # human work — travels with the repo (git-tracked, tiny)
-ANNOTATION_DIR = PROJECT_ROOT / "outputs" / "annotations"
-ENTRANCE_DIR = PROJECT_ROOT / "outputs" / "entrances"
+#
+# OVERSTYRBAR, OG DET ER IKKE PYNT. Dette repoet finnes i to kopier: dette (der dashbordet og
+# annoteringsverktøyet kjører) og kopien inne i sammenslaaing-soppelrom-kart (der webserveren
+# LESER annoteringene). Uten en overstyring skriver dashbordet til sin egen outputs-mappe mens
+# kartet leser den andre, og da er en kveld med annotering usynlig i kartet. Målt 03.08.2026:
+# de to mappene hadde divergert til 107 mot 119 filer, med tre filer endret bare på denne siden.
+#
+# Sett SOPPELROM_ANNOTATION_DIR og SOPPELROM_ENTRANCE_DIR til den kopien som er i git, så har
+# begge verktøyene ÉN mappe. Menneskearbeid skal finnes ett sted.
+ANNOTATION_DIR = _dir("SOPPELROM_ANNOTATION_DIR", PROJECT_ROOT / "outputs" / "annotations")
+ENTRANCE_DIR = _dir("SOPPELROM_ENTRANCE_DIR", PROJECT_ROOT / "outputs" / "entrances")
